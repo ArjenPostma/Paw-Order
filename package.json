@@ -1,0 +1,43 @@
+{
+    "name": "paw-order",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "workspaces": [
+        "packages/shared",
+        "packages/api",
+        "packages/app"
+    ],
+    "engines": {
+        "node": ">=24"
+    },
+    "scripts": {
+        "dev:api": "npm run dev -w @paw-order/api",
+        "dev:app": "npm run dev -w @paw-order/app",
+        "build": "npm run build --workspaces --if-present",
+        "typecheck": "npm run typecheck --workspaces --if-present",
+        "test": "npm run test --workspaces --if-present",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "all": "npm run format && npm run lint:fix && npm run typecheck && npm run test",
+        "typeorm:generate": "npm run typeorm:generate -w @paw-order/api",
+        "typeorm:show": "npm run typeorm:show -w @paw-order/api",
+        "typeorm:migrate:deploy": "npm run typeorm:migrate:deploy -w @paw-order/api"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "@types/node": "^26.1.1",
+        "eslint": "^10.7.0",
+        "prettier": "^3.9.5",
+        "typescript": "~6.0.3",
+        "typescript-eslint": "^8.63.0"
+    },
+    "allowScripts": {
+        "better-sqlite3@12.11.1": true,
+        "esbuild@0.28.2": true,
+        "protobufjs@7.6.5": true,
+        "@google/genai@1.52.0": true
+    }
+}

@@ -1,0 +1,13 @@
+node_modules
+dist
+*.tsbuildinfo
+coverage
+.vite
+*.log
+.DS_Store
+packages/api/database.sqlite
+packages/api/database.sqlite-journal
+packages/api/.env
+packages/app/.env
+.env
+/.idea/

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    check:
+        name: ${{ matrix.check }}
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - check: format:check
+                    - check: lint
+                    - check: typecheck
+                    - check: test
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-node@v6
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - run: npm ci --workspaces --include-workspace-root
+            - run: npm run ${{ matrix.check }}
+
+    build:
+        name: build
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-node@v6
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - run: npm ci --workspaces --include-workspace-root
+            - run: npm run build
+            # Boot the compiled api: catches build output that typechecks but
+            # cannot run (e.g. extensionless ESM imports -> ERR_MODULE_NOT_FOUND).
+            - name: Boot smoke (api dist)
+              run: |
+                  APP_ENV=test PORT=4000 node packages/api/dist/index.js &
+                  pid=$!
+                  ok=""
+                  for _ in $(seq 1 30); do
+                      if curl -sf http://localhost:4000/health > /dev/null; then ok=1; break; fi
+                      sleep 1
+                  done
+                  kill "$pid" 2>/dev/null || true
+                  if [ -z "$ok" ]; then echo "api dist failed to boot"; exit 1; fi
+                  echo "api dist booted and served /health"

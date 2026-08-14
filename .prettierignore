@@ -1,0 +1,9 @@
+node_modules
+dist
+.vite
+coverage
+package-lock.json
+*.sqlite
+*.sqlite-journal
+packages/api/database.sqlite*
+packages/*/dist

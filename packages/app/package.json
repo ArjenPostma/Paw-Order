@@ -1,0 +1,24 @@
+{
+    "name": "@paw-order/app",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "predev": "npm --prefix ../shared run build",
+        "dev": "vite",
+        "prebuild": "npm --prefix ../shared run build",
+        "build": "vue-tsc --noEmit && vite build",
+        "pretypecheck": "npm --prefix ../shared run build",
+        "typecheck": "vue-tsc --noEmit",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@paw-order/shared": "*",
+        "vue": "^3.5.39"
+    },
+    "devDependencies": {
+        "@vitejs/plugin-vue": "^6.0.7",
+        "vite": "^8.1.4",
+        "vue-tsc": "^3.3.7"
+    }
+}
