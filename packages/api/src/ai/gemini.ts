@@ -6,6 +6,8 @@ import { requireEnv } from "@/config/env";
 // reference photo's subject consistent across generated exhibits.
 const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL ?? "gemini-2.5-flash";
 const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-2.5-flash-image";
+// ~12MB of base64, i.e. ~9MB of image. Well above any exhibit this game needs.
+const MAX_IMAGE_BASE64_CHARS = 12 * 1024 * 1024;
 
 let client: GoogleGenAI | null = null;
 
@@ -74,6 +76,12 @@ export async function generateImage(
     for (const part of response.candidates?.[0]?.content?.parts ?? []) {
         const data = part.inlineData?.data;
         if (data) {
+            // Response size is the peer's choice, so bound it before allocating:
+            // a malfunctioning upstream returning a 200MB part would otherwise be
+            // buffered whole, once per exhibit.
+            if (data.length > MAX_IMAGE_BASE64_CHARS) {
+                throw new Error("Gemini returned an image larger than the allowed size");
+            }
             return {
                 bytes: Buffer.from(data, "base64"),
                 mimeType: part.inlineData?.mimeType ?? "image/png",

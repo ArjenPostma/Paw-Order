@@ -47,6 +47,17 @@ export function getDataSourceOptions(env: AppEnv = resolveAppEnv()): DataSourceO
 // QueryRunner, so concurrent dataSource.transaction() calls corrupt its depth
 // counter — add the FIFO wrapper if this api ever runs concurrent transactions.
 
+// ponytail: migrations run from the container start command with no advisory
+// lock, which is safe at ONE replica only. Two replicas both see the migration
+// pending, both execute it, and the loser dies on 42P07 while /health still
+// reports the survivor healthy. Take a pg advisory lock (or move migrations to a
+// Railway pre-deploy step, which runs once) before scaling past one.
+
+// Entity changes reach dev and test through synchronize:true but reach
+// production ONLY through a generated migration, and CI runs on sqlite - so a
+// missing migration is invisible to `npm run all`. Run `npm run typeorm:generate`
+// against a prod-shaped database whenever an entity changes.
+
 // Single DataSource export: the app boots from it and the typeorm CLI (`-d`)
 // resolves it as the one DataSource instance in this file.
 export const AppDataSource = new DataSource(getDataSourceOptions());

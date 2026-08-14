@@ -6,10 +6,16 @@ export type AppEnv = "development" | "test" | "production";
  */
 export function resolveAppEnv(): AppEnv {
     const raw = process.env.APP_ENV;
-    if (raw === "production" || raw === "test") {
-        return raw;
+    if (raw === undefined || raw === "") {
+        return "development";
     }
-    return "development";
+    if (raw !== "production" && raw !== "test" && raw !== "development") {
+        // Refuse to guess. Silently mapping a typo ("prod", "Production", a
+        // trailing space) to development made every production assertion below
+        // early-return and sent prod traffic to a container-local sqlite file.
+        throw new Error(`Unknown APP_ENV: ${JSON.stringify(raw)}`);
+    }
+    return raw;
 }
 
 /**

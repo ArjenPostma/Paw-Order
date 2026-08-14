@@ -11,3 +11,9 @@ packages/api/.env
 packages/app/.env
 .env
 /.idea/
+
+/brand.md
+/CLAUDE.md
+/DEPLOY.md
+/gamedesign.md
+/.claude/

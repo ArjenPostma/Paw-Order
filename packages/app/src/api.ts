@@ -11,7 +11,14 @@ export function apiUrl(path: string): string {
 
 async function readJson(response: Response): Promise<unknown> {
     if (!response.ok) {
-        throw new Error(`Request failed (${response.status})`);
+        // The api sends an actionable message ("max 8MB", "Case not found");
+        // discarding it for a bare status code leaves the user nothing to fix.
+        const body: unknown = await response.json().catch(() => null);
+        const message =
+            typeof body === "object" && body !== null && "error" in body ? body.error : undefined;
+        throw new Error(
+            typeof message === "string" ? message : `Request failed (${response.status})`,
+        );
     }
     return response.json();
 }

@@ -101,8 +101,15 @@ export interface CaseBible {
     verdictRules: VerdictRules;
 }
 
-/** What the client is allowed to see while the trial is running. */
-export type PublicCase = Omit<CaseBible, "truth"> & { id: string };
+/**
+ * What the client is allowed to see while the trial is running.
+ *
+ * `truth?: never` is load-bearing: a plain Omit is structurally satisfied by a
+ * value that still carries truth (an object spread suppresses excess-property
+ * checking), so `return { id, ...bible }` would typecheck and ship the answer.
+ * With never, Truth is not assignable and that regression is a compile error.
+ */
+export type PublicCase = Omit<CaseBible, "truth"> & { id: string; truth?: never };
 
 export interface GameState {
     doubt: number;

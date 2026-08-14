@@ -41,8 +41,8 @@ async function onFileChange(event: Event): Promise<void> {
             <input type="file" accept="image/*" :disabled="busy" @change="onFileChange" />
         </label>
 
-        <p v-if="busy">Filing charges...</p>
-        <p v-if="error">{{ error }}</p>
+        <p aria-live="polite">{{ busy ? "Filing charges..." : "" }}</p>
+        <p role="alert">{{ error }}</p>
 
         <section v-if="currentCase">
             <h2>{{ currentCase.crime.title }}</h2>

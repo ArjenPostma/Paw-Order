@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { requireEnv, resolveAppEnv } from "@/config/env";
+
+/**
+ * The only content types this bucket ever stores, and the extension each one
+ * gets. One map so the two can never disagree - deriving the extension
+ * separately stored webp uploads under a .jpg key.
+ */
+const STORABLE_TYPES = new Map([
+    ["image/jpeg", "jpg"],
+    ["image/png", "png"],
+    ["image/webp", "webp"],
+]);
 
 let client: S3Client | null = null;
 
@@ -22,25 +33,40 @@ function getClient(): S3Client {
     return client;
 }
 
+export interface StoredImage {
+    /** Public URL, or a data URL when the local fallback ran. */
+    url: string;
+    /** Object key, or null when nothing was written to the bucket. */
+    key: string | null;
+}
+
 /**
- * Uploads bytes under `prefix/<uuid>` and returns the public URL.
- * R2_PUBLIC_URL is the bucket's public (or custom) domain — the bucket itself
- * stays private to the api's credentials for writes.
+ * Uploads bytes under `prefix/<uuid>.<ext>` and returns the public URL plus the
+ * key, so a caller that fails afterwards can delete what it wrote.
  */
 export async function uploadImage(
     bytes: Buffer,
     contentType: string,
     prefix: string,
-): Promise<string> {
-    const extension = contentType === "image/png" ? "png" : "jpg";
-    const key = `${prefix}/${randomUUID()}.${extension}`;
-
-    if (resolveAppEnv() !== "production" && !process.env.R2_BUCKET) {
-        // Dev without R2 configured: hand back a data URL so the pipeline runs
-        // end to end locally. Never taken in production (env is asserted at boot).
-        return `data:${contentType};base64,${bytes.toString("base64")}`;
+): Promise<StoredImage> {
+    const extension = STORABLE_TYPES.get(contentType);
+    if (!extension) {
+        // The caller's allowlist should have caught this; a bucket on a public
+        // domain must never serve a type we did not choose.
+        throw new Error(`Refusing to store unsupported content type: ${contentType}`);
     }
 
+    const env = resolveAppEnv();
+    // Tests NEVER write to a real bucket, even when packages/api/.env has R2
+    // configured - data_source.ts loads that file during the test run, so a
+    // `!R2_BUCKET` check alone would send test uploads to production. Dev
+    // without R2 configured gets a data URL so the pipeline runs end to end
+    // locally. Production is neither branch (env is asserted at boot).
+    if (env === "test" || (env === "development" && !process.env.R2_BUCKET)) {
+        return { url: `data:${contentType};base64,${bytes.toString("base64")}`, key: null };
+    }
+
+    const key = `${prefix}/${randomUUID()}.${extension}`;
     await getClient().send(
         new PutObjectCommand({
             Bucket: requireEnv("R2_BUCKET"),
@@ -50,5 +76,22 @@ export async function uploadImage(
         }),
     );
 
-    return `${requireEnv("R2_PUBLIC_URL").replace(/\/+$/, "")}/${key}`;
+    return { url: `${requireEnv("R2_PUBLIC_URL").replace(/\/+$/, "")}/${key}`, key };
+}
+
+/**
+ * Best-effort cleanup for an object whose owning row never got written. Never
+ * throws: the caller is already handling a failure and must not lose it.
+ */
+export async function deleteImage(key: string | null): Promise<void> {
+    if (!key) {
+        return;
+    }
+    try {
+        await getClient().send(
+            new DeleteObjectCommand({ Bucket: requireEnv("R2_BUCKET"), Key: key }),
+        );
+    } catch (error: unknown) {
+        console.error("[paw-order-api] failed to delete orphaned object", key, error);
+    }
 }
