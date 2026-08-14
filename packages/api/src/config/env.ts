@@ -1,4 +1,9 @@
-export type AppEnv = "development" | "test" | "production";
+/**
+ * `drift_check` is CI-only: a throwaway local Postgres restored from the
+ * production schema, used to prove the committed migrations still describe it.
+ * It never runs a server.
+ */
+export type AppEnv = "development" | "test" | "production" | "drift_check";
 
 /**
  * APP_ENV drives the data source and the prod secret assertions. Defaults to
@@ -9,7 +14,7 @@ export function resolveAppEnv(): AppEnv {
     if (raw === undefined || raw === "") {
         return "development";
     }
-    if (raw !== "production" && raw !== "test" && raw !== "development") {
+    if (raw !== "production" && raw !== "test" && raw !== "development" && raw !== "drift_check") {
         // Refuse to guess. Silently mapping a typo ("prod", "Production", a
         // trailing space) to development made every production assertion below
         // early-return and sent prod traffic to a container-local sqlite file.

@@ -40,6 +40,21 @@ export function getDataSourceOptions(env: AppEnv = resolveAppEnv()): DataSourceO
                 extra: { statement_timeout: 60_000, connectionTimeoutMillis: 10_000 },
             };
         }
+        case "drift_check":
+            // Discrete connection vars, supplied by scripts/check-migration-drift.sh:
+            // a throwaway local Postgres restored from the production schema.
+            // Never a live database - the drift check runs migrations against it.
+            return {
+                type: "postgres",
+                host: process.env.DATABASE_HOST,
+                port: Number(process.env.DATABASE_PORT ?? 5432),
+                username: process.env.DATABASE_USER,
+                password: process.env.DATABASE_PASSWORD,
+                database: process.env.DATABASE_NAME,
+                synchronize: false,
+                entities,
+                migrations: ["dist/database_bundle/migrations/*.js"],
+            };
     }
 }
 
