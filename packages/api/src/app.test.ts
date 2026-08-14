@@ -2,7 +2,12 @@ import "reflect-metadata";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "@/app";
-import { assertAppEnvExplicit, assertProductionEnv, resolveAppEnv } from "@/config/env";
+import {
+    assertAppEnvExplicit,
+    assertProductionEnv,
+    positiveIntEnv,
+    resolveAppEnv,
+} from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
 
 // Smallest valid PNG (1x1, transparent).
@@ -12,6 +17,22 @@ const PNG_1X1 = Buffer.from(
 );
 
 const app = createApp();
+
+/**
+ * Generation runs in the background, so a freshly created case is PENDING and
+ * the client polls. In test the generator returns a fixture with no model call,
+ * so this resolves in a handful of ticks.
+ */
+async function pollUntilReady(id: string): Promise<request.Response> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+        const response = await request(app).get(`/api/cases/${id}`);
+        if (response.body.status !== "PENDING") {
+            return response;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("case never left PENDING");
+}
 
 beforeAll(async () => {
     await AppDataSource.initialize();
@@ -33,21 +54,54 @@ describe("api wiring", () => {
         expect(response.status).toBe(400);
     });
 
-    it("persists an uploaded case and serves it back without the hidden truth", async () => {
+    it("accepts an upload without generating inline", async () => {
         const created = await request(app)
             .post("/api/cases")
             .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
 
-        expect(created.status).toBe(201);
+        // 202 and an id only: the case does not exist yet.
+        expect(created.status).toBe(202);
         expect(created.body.id).toBeTruthy();
+        expect(created.body.status).toBe("PENDING");
+        expect(created.body.defendant).toBeUndefined();
         expect(created.body.truth).toBeUndefined();
+    });
 
-        const fetched = await request(app).get(`/api/cases/${created.body.id}`);
+    it("serves a finished case back without the hidden truth", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+
+        const fetched = await pollUntilReady(created.body.id);
         expect(fetched.status).toBe(200);
+        expect(fetched.body.status).toBe("READY");
         expect(fetched.body.id).toBe(created.body.id);
         expect(fetched.body.truth).toBeUndefined();
+        expect(fetched.body.nodes.length).toBeGreaterThan(0);
+        expect(fetched.body.rootNodeId).toBeTruthy();
         // Tests must never write to the real bucket, whatever packages/api/.env holds.
         expect(fetched.body.defendant.photoUrl).toContain("data:image/png");
+    });
+
+    // A PENDING row still holds the placeholder bible. Serving it would put an
+    // empty trial in front of the player, so the status arm carries no case at all.
+    it("withholds the bible until the case is READY", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+
+        const pending = await request(app).get(`/api/cases/${created.body.id}`);
+        expect(pending.status).toBe(200);
+        if (pending.body.status === "PENDING") {
+            expect(pending.body.nodes).toBeUndefined();
+            expect(pending.body.defendant).toBeUndefined();
+            expect(pending.headers["cache-control"]).toBe("no-store");
+        }
+
+        // Whatever the timing, the case must finish and never leak the truth.
+        const ready = await pollUntilReady(created.body.id);
+        expect(ready.body.status).toBe("READY");
+        expect(ready.body.truth).toBeUndefined();
     });
 
     it("404s an unknown case", async () => {
@@ -142,5 +196,30 @@ describe("env guards", () => {
 
     it("checks nothing outside production", () => {
         expect(() => assertProductionEnv("test")).not.toThrow();
+    });
+
+    // NaN does not throw, it silently disables the guard it is compared against:
+    // `inFlight >= NaN` is false forever, so a typo'd ceiling removes the cap
+    // instead of breaking loudly. Every one of these fails open.
+    it("falls back to the default rather than returning NaN", () => {
+        const previous = process.env.TEST_TUNABLE;
+        try {
+            process.env.TEST_TUNABLE = "three";
+            expect(positiveIntEnv("TEST_TUNABLE", 3)).toBe(3);
+            process.env.TEST_TUNABLE = "0";
+            expect(positiveIntEnv("TEST_TUNABLE", 3)).toBe(3);
+            process.env.TEST_TUNABLE = "-5";
+            expect(positiveIntEnv("TEST_TUNABLE", 3)).toBe(3);
+            process.env.TEST_TUNABLE = "";
+            expect(positiveIntEnv("TEST_TUNABLE", 3)).toBe(3);
+            process.env.TEST_TUNABLE = "7";
+            expect(positiveIntEnv("TEST_TUNABLE", 3)).toBe(7);
+        } finally {
+            if (previous === undefined) {
+                delete process.env.TEST_TUNABLE;
+            } else {
+                process.env.TEST_TUNABLE = previous;
+            }
+        }
     });
 });

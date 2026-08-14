@@ -18,6 +18,13 @@ set -euo pipefail
 
 : "${DATABASE_URL:?Missing DATABASE_URL}"
 
+# Absolute, because this script cds into packages/api partway through and the
+# EXIT trap below would otherwise try to delete the dumps relative to there,
+# leaving a copy of the production schema on the runner's disk.
+ROOT_DIR="$(pwd)"
+SCHEMA_DUMP="${ROOT_DIR}/schema.sql"
+MIGRATIONS_DUMP="${ROOT_DIR}/migrations_data.sql"
+
 API_DIR="packages/api"
 DIST_DATA_SOURCE="./dist/database_bundle/util/data_source.js"
 MIGRATIONS_DIR="./src/database_bundle/migrations"
@@ -29,7 +36,7 @@ LOCAL_PORT=5433
 
 cleanup() {
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    rm -f schema.sql migrations_data.sql
+    rm -f "$SCHEMA_DUMP" "$MIGRATIONS_DUMP"
 }
 trap cleanup EXIT
 
@@ -47,7 +54,7 @@ docker run --rm --network=host -e DATABASE_URL="$DATABASE_URL" "$PG_IMAGE" \
 
 echo "Dumping the production schema..."
 docker run --rm --network=host -e DATABASE_URL="$DATABASE_URL" "$PG_IMAGE" \
-    bash -c 'pg_dump --schema-only --no-owner --no-privileges "$DATABASE_URL"' > schema.sql
+    bash -c 'pg_dump --schema-only --no-owner --no-privileges "$DATABASE_URL"' > "$SCHEMA_DUMP"
 
 echo "Starting a throwaway local Postgres..."
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -70,15 +77,15 @@ for attempt in $(seq 1 20); do
 done
 
 echo "Restoring the production schema locally..."
-PGPASSWORD=postgres psql -q -h localhost -p "$LOCAL_PORT" -U postgres -d drift_check < schema.sql
+PGPASSWORD=postgres psql -q -h localhost -p "$LOCAL_PORT" -U postgres -d drift_check < "$SCHEMA_DUMP"
 
 # The migrations table tells TypeORM which migrations prod has already applied.
 # Without it every committed migration re-runs against a schema that already has
 # them, and the run fails on "relation already exists" rather than reporting drift.
 echo "Copying the migration history..."
 if docker run --rm --network=host -e DATABASE_URL="$DATABASE_URL" "$PG_IMAGE" \
-    bash -c 'pg_dump --data-only --inserts --table=migrations "$DATABASE_URL"' > migrations_data.sql 2>/dev/null; then
-    PGPASSWORD=postgres psql -q -h localhost -p "$LOCAL_PORT" -U postgres -d drift_check < migrations_data.sql
+    bash -c 'pg_dump --data-only --inserts --table=migrations "$DATABASE_URL"' > "$MIGRATIONS_DUMP" 2>/dev/null; then
+    PGPASSWORD=postgres psql -q -h localhost -p "$LOCAL_PORT" -U postgres -d drift_check < "$MIGRATIONS_DUMP"
 else
     echo "No migrations table in production yet (first deploy)."
 fi
@@ -98,20 +105,24 @@ npx typeorm migration:run -d "$DIST_DATA_SOURCE"
 echo "Generating a migration - anything produced here is drift..."
 GENERATED="${MIGRATIONS_DIR}/9999999999999-DriftCheck"
 set +e
-npx typeorm migration:generate "$GENERATED" -d "$DIST_DATA_SOURCE"
+GENERATE_OUTPUT=$(npx typeorm migration:generate "$GENERATED" -d "$DIST_DATA_SOURCE" 2>&1)
 GENERATE_EXIT=$?
 set -e
+echo "$GENERATE_OUTPUT"
 
-# TypeORM exits 1 with "No changes in database schema were found" when the
-# entities and the schema already agree. That is the success case here.
-if [ "$GENERATE_EXIT" -eq 1 ]; then
+# TypeORM exits 1 BOTH when the entities and the schema already agree and when
+# the command genuinely failed - a refused connection, an unreadable data source,
+# a broken build. Keying the success case off the exit code alone therefore
+# reports "No drift" for a check that never actually ran, which is the one
+# failure this script exists to prevent. Match the message instead.
+if grep -qF "No changes in database schema were found" <<<"$GENERATE_OUTPUT"; then
     echo "No drift: the committed migrations describe the production schema."
     exit 0
 fi
 
 if [ "$GENERATE_EXIT" -ne 0 ]; then
     echo "ERROR: migration generation failed with exit code ${GENERATE_EXIT}"
-    exit "$GENERATE_EXIT"
+    exit 1
 fi
 
 DRIFT_FILE="${GENERATED}.ts"

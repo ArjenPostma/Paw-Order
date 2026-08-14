@@ -111,6 +111,25 @@ export interface CaseBible {
  */
 export type PublicCase = Omit<CaseBible, "truth"> & { id: string; truth?: never };
 
+export const CASE_STATUSES = ["PENDING", "READY", "FAILED"] as const;
+
+export type CaseStatus = (typeof CASE_STATUSES)[number];
+
+/** What POST /api/cases answers: the case does not exist yet, only its id. */
+export interface CaseAccepted {
+    id: string;
+    status: CaseStatus;
+}
+
+/**
+ * What GET /api/cases/:id answers. Generation is asynchronous (a bible plus
+ * four image calls runs far past any edge timeout), so the client polls this.
+ * Only the READY arm carries the case, which is what stops a half-generated
+ * bible — empty nodes, no rootNodeId — from ever reaching a courtroom.
+ */
+export type CaseStatusResponse =
+    { id: string; status: "PENDING" | "FAILED" } | ({ status: "READY" } & PublicCase);
+
 export interface GameState {
     doubt: number;
     credibility: number;

@@ -72,6 +72,31 @@ export function resolveCorsOrigin(): string[] {
         .filter((origin) => origin.length > 0);
 }
 
+/**
+ * Reads a numeric tunable, refusing to return NaN.
+ *
+ * `Number("three")` is NaN, and NaN does not throw - it silently disables
+ * whatever it guards. `inFlight >= NaN` is always false, so one typo in
+ * GENERATION_MAX_CONCURRENT removes the cap that bounds the api bill; the same
+ * value in a rate limiter's `max` removes the rate limit. Every one of these
+ * fails open, which is exactly the wrong direction, so a bad value falls back to
+ * the default and says so in the log.
+ */
+export function positiveIntEnv(key: string, fallback: number): number {
+    const raw = process.env[key];
+    if (raw === undefined || raw === "") {
+        return fallback;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value <= 0) {
+        console.warn(
+            `[paw-order-api] ${key}=${JSON.stringify(raw)} is not a positive integer, falling back to ${String(fallback)}`,
+        );
+        return fallback;
+    }
+    return value;
+}
+
 /** Reads an env var that is guaranteed present by assertProductionEnv. */
 export function requireEnv(key: string): string {
     const value = process.env[key];

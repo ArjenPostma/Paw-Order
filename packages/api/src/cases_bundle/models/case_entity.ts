@@ -1,5 +1,5 @@
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from "typeorm";
-import type { CaseBible } from "@paw-order/shared";
+import type { CaseBible, CaseStatus } from "@paw-order/shared";
 
 /**
  * One generated trial. The whole Case Bible lives in a single json column:
@@ -22,6 +22,18 @@ export class CaseEntity {
 
     @Column("simple-json")
     bible!: CaseBible;
+
+    /**
+     * The row is inserted PENDING and the bible is filled in by a background
+     * job, so this is the only thing that says whether `bible` is a real case
+     * or the placeholder. Serving a PENDING row's bible would ship an empty
+     * trial; findCaseStatus is what enforces that.
+     *
+     * varchar, not a Postgres enum: an enum needs its own migration to gain a
+     * value, and the union in @paw-order/shared is the real constraint.
+     */
+    @Column({ type: "varchar", length: 16, default: "PENDING" })
+    status!: CaseStatus;
 
     // TIMESTAMP without time zone (see the generated migration): the stored
     // instant carries no offset, so it is only meaningful because every writer

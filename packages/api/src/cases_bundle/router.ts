@@ -1,7 +1,12 @@
 import { Router } from "express";
 import type { RequestHandler } from "express";
 import multer, { MulterError } from "multer";
-import { createCase, findPublicCase } from "@/cases_bundle/services/case_service";
+import { positiveIntEnv } from "@/config/env";
+import {
+    GenerationBusyError,
+    createCase,
+    findCaseStatus,
+} from "@/cases_bundle/services/case_service";
 import { rateLimit } from "@/http/rate_limit";
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
@@ -47,8 +52,8 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
 // are env-tunable so a load test (or the suite) can raise them without editing code.
 const generationLimiter = rateLimit({
     windowMs: 60_000,
-    max: Number(process.env.GENERATION_MAX_PER_MINUTE ?? 1),
-    dailyMax: Number(process.env.GENERATION_MAX_PER_DAY ?? 50),
+    max: positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
+    dailyMax: positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
 });
 
 export const casesRouter = Router();
@@ -60,8 +65,18 @@ casesRouter.post("/", generationLimiter, uploadPhoto, async (req, res) => {
         return;
     }
 
-    const publicCase = await createCase({ bytes: file.buffer, mimeType: file.mimetype });
-    res.status(201).json(publicCase);
+    try {
+        // 202, not 201: the case does not exist yet. Generation runs in the
+        // background and the client polls GET /:id until it is READY.
+        const accepted = await createCase({ bytes: file.buffer, mimeType: file.mimetype });
+        res.status(202).json(accepted);
+    } catch (error: unknown) {
+        if (error instanceof GenerationBusyError) {
+            res.status(503).json({ error: "The court is full. Try again in a minute." });
+            return;
+        }
+        throw error;
+    }
 });
 
 casesRouter.get("/:id", async (req, res) => {
@@ -74,13 +89,19 @@ casesRouter.get("/:id", async (req, res) => {
         return;
     }
 
-    const publicCase = await findPublicCase(id);
-    if (!publicCase) {
+    const result = await findCaseStatus(id);
+    if (!result) {
         res.status(404).json({ error: "Case not found." });
         return;
     }
 
-    // A generated case never changes, so a reload should not re-fetch it.
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    res.json(publicCase);
+    if (result.status === "READY") {
+        // A generated case never changes, so a reload should not re-fetch it.
+        // Only READY: caching a PENDING body for a year would freeze the poll
+        // on "preparing" and the case would never appear.
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+        res.setHeader("Cache-Control", "no-store");
+    }
+    res.json(result);
 });

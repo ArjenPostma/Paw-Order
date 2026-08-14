@@ -1,33 +1,227 @@
-import type { CaseBible } from "@paw-order/shared";
+import type { Schema } from "@google/genai";
+import type { CaseBible, Evidence } from "@paw-order/shared";
+import { IMAGE_MODEL, TEXT_MODEL, generateImage, generateJson } from "@/ai/gemini";
 import type { GeneratedImage } from "@/ai/gemini";
+import { resolveAppEnv } from "@/config/env";
+import { fixtureBible } from "@/cases_bundle/services/case_fixture";
+import {
+    FACTS_SCHEMA,
+    TREE_SCHEMA,
+    factsPrompt,
+    treePrompt,
+} from "@/cases_bundle/services/case_prompt";
+import { validateFacts, validateTree } from "@/cases_bundle/services/case_validator";
+import type { ValidationResult } from "@/cases_bundle/services/case_validator";
+import { uploadImage } from "@/storage/r2";
+
+export interface GeneratedCase {
+    bible: CaseBible;
+    /** R2 keys this run wrote, so a later failure can reclaim them. */
+    storedKeys: string[];
+}
+
+/**
+ * Carries the orphaned keys out with the failure so the caller can delete them.
+ * `stage` is in the message because this error is what reaches the api log, and
+ * "generation failed" without the stage means reading a stack trace to learn
+ * whether the facts, the images or the tree were the problem.
+ */
+export class GenerationFailure extends Error {
+    constructor(
+        readonly stage: string,
+        readonly storedKeys: string[],
+        readonly reason: unknown,
+    ) {
+        super(`Case generation failed at stage: ${stage} (after writing images)`);
+    }
+}
+
+/** One retry. A model that fails the validator twice is not going to converge. */
+const MAX_ATTEMPTS = 2;
+
+/**
+ * Asks for JSON, validates it, and on rejection asks again with the reasons.
+ * The feedback loop is the whole point: "nextNodeId N9 is not a node" is
+ * something a model can act on, where a bare retry just rolls the dice again.
+ */
+async function generateValidated<T>(
+    stage: string,
+    prompt: string,
+    schema: Schema,
+    validate: (value: unknown) => ValidationResult<T>,
+    options: { reference?: GeneratedImage; signal?: AbortSignal },
+): Promise<T> {
+    let feedback = "";
+    let lastErrors: string[] = [];
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        let text: string;
+        try {
+            text = await generateJson(prompt + feedback, schema, options);
+        } catch (error: unknown) {
+            // A 400 here is the REQUEST being rejected, not the answer, and the
+            // api never says which field it disliked. Naming the stage is what
+            // narrows it down: the two stages send different schemas, and the
+            // tree one is the schema that has already caused this once (see the
+            // TREE_SCHEMA note about minItems on nested arrays).
+            console.error(
+                `[paw-order-api] ${stage}: Gemini rejected the request itself on attempt ${String(attempt)}.`,
+                `model=${TEXT_MODEL} promptChars=${String((prompt + feedback).length)} schemaKeys=${describeSchema(schema)}`,
+                error,
+            );
+            throw error;
+        }
+
+        const parsed = parseJson(text);
+        if (parsed === null) {
+            // Distinguishable from a schema violation: the response was not JSON
+            // at all, which usually means a truncated answer or a safety block.
+            console.warn(
+                `[paw-order-api] ${stage}: response was not JSON on attempt ${String(attempt)}, ${String(text.length)} chars`,
+            );
+        }
+
+        const result = validate(parsed);
+        if (result.ok) {
+            return result.value;
+        }
+        lastErrors = result.errors;
+
+        // Never log `text` itself: it is a model response that may be arbitrarily
+        // long, and the reasons already name every field that failed.
+        console.warn(
+            `[paw-order-api] ${stage}: response rejected on attempt ${String(attempt)} of ${String(MAX_ATTEMPTS)} for ${String(result.errors.length)} reasons:\n  - ${result.errors.join("\n  - ")}`,
+        );
+        feedback = `\n\nYour previous answer was rejected for these reasons:\n${result.errors
+            .map((error) => `- ${error}`)
+            .join("\n")}\nReturn corrected JSON that fixes every one of them.`;
+    }
+
+    // Carry the reasons into the message: this is the error that reaches the
+    // request log, and "failed validation twice" on its own says nothing.
+    throw new Error(
+        `${stage} failed validation ${String(MAX_ATTEMPTS)} times. Last reasons: ${lastErrors.join("; ")}`,
+    );
+}
+
+/** Top-level property names only — enough to tell the two schemas apart. */
+function describeSchema(schema: Schema): string {
+    return Object.keys(schema.properties ?? {}).join(",");
+}
+
+/** A model can return non-JSON despite responseMimeType; that is a rejection. */
+function parseJson(text: string): unknown {
+    try {
+        return JSON.parse(text);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Renders every exhibit concurrently, so the wall clock is one image rather than
+ * four. allSettled, not all: one refused or malformed image leaves that exhibit
+ * pictureless (Evidence.imageUrl is nullable for exactly this) and the trial
+ * still plays. Losing a whole generated case to one flaky call is worse.
+ */
+async function renderEvidence(
+    evidence: Evidence[],
+    photo: GeneratedImage,
+    signal: AbortSignal,
+): Promise<{ evidence: Evidence[]; storedKeys: string[] }> {
+    const results = await Promise.allSettled(
+        evidence.map(async (exhibit) => {
+            const image = await generateImage(exhibit.imagePrompt, photo, signal);
+            return uploadImage(image.bytes, image.mimeType, "evidence");
+        }),
+    );
+
+    const storedKeys: string[] = [];
+    const rendered = evidence.map((exhibit, index) => {
+        const result = results[index];
+        if (!result || result.status === "rejected") {
+            console.error(
+                `[paw-order-api] exhibit ${exhibit.id} has no image (model=${IMAGE_MODEL}). The trial still plays without it.`,
+                result?.status === "rejected" ? result.reason : "missing result",
+            );
+            return exhibit;
+        }
+        if (result.value.key !== null) {
+            storedKeys.push(result.value.key);
+        }
+        return { ...exhibit, imageUrl: result.value.url };
+    });
+
+    // One pictureless exhibit is a survivable trial. Four is not a case at all -
+    // it means the image model is down, out of quota, or refused the whole batch,
+    // and every visual claim the trial makes would point at nothing. Better a
+    // FAILED the player can retry than a READY case with no evidence in it.
+    if (!rendered.some((exhibit) => exhibit.imageUrl !== null)) {
+        const firstRejection = results.find((result) => result.status === "rejected");
+        throw new GenerationFailure(
+            "evidence images",
+            storedKeys,
+            firstRejection?.status === "rejected"
+                ? firstRejection.reason
+                : new Error("no exhibit produced an image"),
+        );
+    }
+
+    return { evidence: rendered, storedKeys };
+}
 
 /**
  * The generation seam: photo in, complete Case Bible out. Everything downstream
- * (persistence, the trial engine, the verdict) reads only this return value, so
- * the real generator can land here without touching the rest of the api.
+ * (persistence, the trial engine, the verdict) reads only this return value.
  *
- * ponytail: placeholder bible — no Gemini calls yet, so upload/persist/serve can
- * be verified end to end first. Replace the body with the two-step pipeline
- * (generateJson for the bible -> generateImage per exhibit -> uploadImage) when
- * the prompts are written.
+ * Facts first, then images, then the trial tree — the tree is generated last so
+ * it can only be built from exhibits that already exist (gamedesign.md §12).
  */
 export async function generateCaseBible(
     photoUrl: string,
-    _photo: GeneratedImage,
-): Promise<CaseBible> {
-    return {
-        defendant: { name: "Unnamed", photoUrl },
-        crime: {
-            charge: "Pending investigation",
-            title: "Untitled Case",
-            location: "Unknown",
-            timeline: [],
-        },
-        truth: { summary: "Not yet generated.", misleadingEvidenceIds: [] },
-        evidence: [],
-        witnesses: [],
-        nodes: [],
-        rootNodeId: "",
-        verdictRules: { acquitAtDoubt: 60, suspiciousAtSuspicion: 50 },
-    };
+    photo: GeneratedImage,
+    signal: AbortSignal,
+): Promise<GeneratedCase> {
+    if (resolveAppEnv() === "test") {
+        // The suite must never reach Gemini. Same guard shape as r2.ts.
+        return { bible: fixtureBible(photoUrl), storedKeys: [] };
+    }
+
+    const facts = await generateValidated(
+        "case facts",
+        factsPrompt(),
+        FACTS_SCHEMA,
+        validateFacts,
+        { reference: photo, signal },
+    );
+
+    const { evidence, storedKeys } = await renderEvidence(facts.evidence, photo, signal);
+
+    // From here on this run owns paid objects, so the caller needs the keys even
+    // when the tree stage throws.
+    try {
+        const tree = await generateValidated(
+            "trial tree",
+            treePrompt({ ...facts, evidence }),
+            TREE_SCHEMA,
+            (value) => validateTree(value, evidence),
+            { signal },
+        );
+
+        return {
+            bible: {
+                defendant: { name: facts.defendantName, photoUrl },
+                crime: facts.crime,
+                truth: facts.truth,
+                evidence,
+                witnesses: facts.witnesses,
+                nodes: tree.nodes,
+                rootNodeId: tree.rootNodeId,
+                verdictRules: tree.verdictRules,
+            },
+            storedKeys,
+        };
+    } catch (error: unknown) {
+        throw new GenerationFailure("trial tree", storedKeys, error);
+    }
 }
