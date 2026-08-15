@@ -39,7 +39,23 @@ export function createApp(): Express {
     // Last resort: log the detail server-side, return a generic body. Express 5
     // routes rejected async handlers here automatically.
     const errorHandler: ErrorRequestHandler = (error, _req, res, next) => {
-        console.error("[paw-order-api] unhandled error", error);
+        // express.json reports a malformed or oversized body by throwing an
+        // error carrying its own 4xx status. Reporting those as 500 tells the
+        // caller the server broke when in fact their request did, and writes a
+        // stack trace per hit - an anonymous caller choosing the log volume.
+        const status =
+            typeof error === "object" &&
+            error !== null &&
+            "status" in error &&
+            typeof error.status === "number" &&
+            error.status >= 400 &&
+            error.status < 500
+                ? error.status
+                : 500;
+
+        if (status === 500) {
+            console.error("[paw-order-api] unhandled error", error);
+        }
         // Once the response has started, setting a status throws
         // ERR_HTTP_HEADERS_SENT; Express's default handler destroys the socket
         // instead of leaving it half-written.
@@ -47,7 +63,9 @@ export function createApp(): Express {
             next(error);
             return;
         }
-        res.status(500).json({ error: "Something went wrong." });
+        res.status(status).json({
+            error: status === 500 ? "Something went wrong." : "That request could not be read.",
+        });
     };
     app.use(errorHandler);
 

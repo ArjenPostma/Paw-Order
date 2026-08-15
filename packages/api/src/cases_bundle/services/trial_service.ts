@@ -1,4 +1,4 @@
-import type { CaseBible, TurnResponse } from "@paw-order/shared";
+import type { CaseBible, PublicEvidence, TurnResponse } from "@paw-order/shared";
 import {
     initialState,
     publicNode,
@@ -41,10 +41,24 @@ export async function playTurn(id: string, path: unknown): Promise<TurnOutcome> 
 }
 
 /**
- * Exported for the unit tests: this is the whole game loop, and driving it
- * through HTTP for every branch would be slower without checking anything more.
+ * The exhibits a run has unlocked: what the nodes it visited put in play, plus
+ * what its choices revealed. Both halves matter - a statement that cites an
+ * exhibit has to be readable alongside it, and a choice that reveals one has to
+ * actually hand it over.
  */
-export function replayRun(bible: CaseBible, path: unknown): TurnOutcome {
+function unlockedEvidence(bible: CaseBible, ids: Set<string>): PublicEvidence[] {
+    return bible.evidence
+        .filter((exhibit) => ids.has(exhibit.id))
+        .map(({ imagePrompt: _prompt, ...exhibit }) => exhibit);
+}
+
+function replayRun(bible: CaseBible, path: unknown): TurnOutcome {
+    if (!Array.isArray(bible.nodes)) {
+        // Only reachable for a row written around validateTree, but this is a
+        // json column: treat its shape as a claim, not a fact.
+        console.error("[paw-order-api] bible has no node array");
+        return "NOT_PLAYABLE";
+    }
     if (!Array.isArray(path)) {
         return "INVALID_PATH";
     }
@@ -56,8 +70,18 @@ export function replayRun(bible: CaseBible, path: unknown): TurnOutcome {
         return "INVALID_PATH";
     }
 
+    const nodeById = new Map(bible.nodes.map((node) => [node.id, node]));
+    const root = nodeById.get(bible.rootNodeId);
+    if (!root) {
+        // Matches findCaseStatus: a READY case with no opening statement is a
+        // broken case, not a bad request, and the operator needs to hear it.
+        console.error("[paw-order-api] bible is READY with no root node");
+        return "NOT_PLAYABLE";
+    }
+
     let state = initialState();
     let nodeId: string | null = bible.rootNodeId;
+    const seen = new Set(root.evidenceIds);
     for (const choiceIndex of steps) {
         // A step after the trial ended is not a legal run, even though every
         // step before it was.
@@ -70,6 +94,12 @@ export function replayRun(bible: CaseBible, path: unknown): TurnOutcome {
         }
         state = turn.state;
         nodeId = turn.nextNodeId;
+        for (const id of nodeById.get(nodeId ?? "")?.evidenceIds ?? []) {
+            seen.add(id);
+        }
+    }
+    for (const id of state.revealedEvidenceIds) {
+        seen.add(id);
     }
 
     if (nodeId === null) {
@@ -78,20 +108,23 @@ export function replayRun(bible: CaseBible, path: unknown): TurnOutcome {
             verdict: resolveVerdict(state, bible.verdictRules),
             score: scoreDefense(state, bible.nodes, bible.rootNodeId),
             truth: bible.truth,
-            revealedEvidenceIds: state.revealedEvidenceIds,
+            // Everything, once the trial is over: the verdict screen is where
+            // the case is explained, so withholding exhibits there serves
+            // nothing.
+            evidence: unlockedEvidence(bible, new Set(bible.evidence.map((item) => item.id))),
         };
     }
 
-    const node = bible.nodes.find((candidate) => candidate.id === nodeId);
+    const node = nodeById.get(nodeId);
     if (!node) {
-        // takeChoice only ever returns an id it resolved, and rootNodeId is
-        // validated before the case is stored, so this is unreachable for a
-        // stored bible. It is not an assertion: narrowing beats a non-null.
+        // validateTree rejects a choice pointing at an unknown node, which is
+        // what makes this unreachable - takeChoice returns nextNodeId verbatim
+        // and never resolves it itself. Narrowing beats a non-null assertion.
         return "INVALID_PATH";
     }
     return {
         status: "NODE",
         node: publicNode(node),
-        revealedEvidenceIds: state.revealedEvidenceIds,
+        evidence: unlockedEvidence(bible, seen),
     };
 }

@@ -142,14 +142,25 @@ export type PublicTrialNode = Omit<TrialNode, "choices"> & { choices: PublicChoi
  * favour of `rootNode`. `verdictRules` goes with them: the verdict is computed
  * here now, and the thresholds are just a number to farm towards.
  */
-export type PublicCase = Omit<
-    CaseBible,
-    "truth" | "witnesses" | "evidence" | "nodes" | "rootNodeId" | "verdictRules"
-> & {
+/**
+ * Pick, not Omit. An Omit ships every field of CaseBible that is not named,
+ * so adding one to the bible later puts it on the wire with no compile error
+ * and no test failure - the same hazard publicNode is hand-written to avoid,
+ * one level up. With Pick, a new bible field reaches the client only when
+ * someone adds it here on purpose. Build the response field by field too: an
+ * object spread would carry it anyway.
+ */
+export type PublicCase = Pick<CaseBible, "defendant" | "crime"> & {
     id: string;
     truth?: never;
     /** Narrowed, not inherited: see PublicWitness and PublicEvidence. */
     witnesses: PublicWitness[];
+    /**
+     * Only the exhibits the opening node puts in play. The rest arrive as the
+     * trial reveals them: shipping all three up front made revealsEvidenceIds
+     * decorative, and let a player read E3's clock against W1's claim to work
+     * out which witness is lying before the first question (gamedesign.md 8).
+     */
     evidence: PublicEvidence[];
     rootNode: PublicTrialNode;
 };
@@ -197,7 +208,13 @@ export type TurnResponse =
     | {
           status: "NODE";
           node: PublicTrialNode;
-          revealedEvidenceIds: string[];
+          /**
+           * Every exhibit unlocked so far: the ones the nodes visited put in
+           * play, plus the ones choices revealed. Sent whole rather than as
+           * ids, because the client is no longer given the full exhibit list
+           * to look them up in.
+           */
+          evidence: PublicEvidence[];
           truth?: never;
       }
     | {
@@ -205,7 +222,7 @@ export type TurnResponse =
           verdict: Verdict;
           score: number;
           truth: Truth;
-          revealedEvidenceIds: string[];
+          evidence: PublicEvidence[];
       };
 
 export interface GameState {

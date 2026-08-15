@@ -133,22 +133,43 @@ function pathFromBody(body: unknown): unknown {
 }
 
 /**
- * One turn of the trial. No rate limiter: this spends no model budget, writes
- * nothing, and the work is bounded by the node count, which is at most 24. The
- * body is capped by express.json's 1mb limit in app.ts, and the path length by
- * replayRun.
+ * A turn spends no model budget and writes nothing, but it is not free: every
+ * request is a full row read that deserialises the entire bible json column to
+ * answer with one node, and it is uncacheable. Unlimited, that is enough
+ * event-loop time to starve the generation path, whose final write would then
+ * miss GENERATION_TIMEOUT_MS and fail a case with all five model calls already
+ * paid for. 120 a minute is roughly twenty times a human's clicking rate.
  */
-casesRouter.post("/:id/turn", async (req, res) => {
+const perIpTurnLimiter = rateLimit({
+    windowMs: 60_000,
+    max: positiveIntEnv("TURN_MAX_PER_MINUTE", 120),
+});
+
+/** One turn of the trial. */
+casesRouter.post("/:id/turn", perIpTurnLimiter, async (req, res) => {
+    // A run is a live thing, unlike the case it is played against. Set before
+    // the guards so every arm carries it, the 404 included.
+    res.setHeader("Cache-Control", "no-store");
+
+    // typeof, not a truthiness check: adding a middleware to this route widens
+    // Express's inferred params to string | string[], and a repeated :id would
+    // otherwise reach the pattern test as an array.
     const id = req.params.id;
-    if (!id || !UUID_PATTERN.test(id)) {
+    if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
         res.status(404).json({ error: "Case not found." });
         return;
     }
 
-    // A run is a live thing, unlike the case it is played against.
-    res.setHeader("Cache-Control", "no-store");
+    // Shape-checked before the database read: a junk body should not cost a row
+    // fetch and a full json parse. replayRun re-checks - this is the cheap out,
+    // not the guard.
+    const path = pathFromBody(req.body);
+    if (!Array.isArray(path)) {
+        res.status(400).json({ error: "That is not a run of this trial." });
+        return;
+    }
 
-    const outcome = await playTurn(id, pathFromBody(req.body));
+    const outcome = await playTurn(id, path);
     if (outcome === "NOT_PLAYABLE") {
         res.status(404).json({ error: "Case not found." });
         return;

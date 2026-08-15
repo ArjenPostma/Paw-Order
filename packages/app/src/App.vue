@@ -1,7 +1,26 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import type { PublicCase, PublicTrialNode, Truth, Verdict } from "@paw-order/shared";
+import { computed, nextTick, ref } from "vue";
+import type {
+    PublicCase,
+    PublicEvidence,
+    PublicTrialNode,
+    Truth,
+    Verdict,
+} from "@paw-order/shared";
 import { createCase, fetchCase, playTurn } from "@/api";
+
+/**
+ * brand.md is the authority for player-facing wording, and gamedesign.md 9
+ * spells these four out with their punctuation. A Record rather than a
+ * replaceAll over the enum: adding a verdict should be a compile error here,
+ * not a de-underscored identifier shipped to a player.
+ */
+const VERDICT_COPY: Record<Verdict, string> = {
+    NOT_GUILTY: "NOT GUILTY",
+    NOT_GUILTY_BUT_SUSPICIOUS: "NOT GUILTY, BUT SUSPICIOUS",
+    GUILTY_BUT_REASONABLE_DOUBT: "GUILTY, BUT REASONABLE DOUBT",
+    GUILTY: "GUILTY",
+};
 
 // Infrastructure shell only, deliberately unstyled: proves upload -> generation
 // -> poll -> client. The real screens (Landing, Case introduction, Courtroom,
@@ -27,17 +46,42 @@ const status = ref<"idle" | "preparing" | "ready">("idle");
  */
 const path = ref<number[]>([]);
 const node = ref<PublicTrialNode | null>(null);
-const revealedEvidenceIds = ref<string[]>([]);
+// Exhibits the api has unlocked so far. The case no longer arrives with the
+// whole set, so this IS the exhibit list, not a list of ids into one.
+const exhibits = ref<PublicEvidence[]>([]);
 const outcome = ref<{ verdict: Verdict; score: number; truth: Truth } | null>(null);
 // One turn in flight at a time: two clicks would otherwise push two indexes and
 // send a path the player never chose.
 const turning = ref(false);
+// Focused after every turn. Without it the button that was just pressed is
+// destroyed by the re-render and focus falls to document.body, so a keyboard
+// player tabs past the upload field and every exhibit again on each question.
+const statementRef = ref<HTMLElement | null>(null);
+
+/**
+ * Exhibit labels, not ids: "E2" is a database key, and the label is already on
+ * the exhibit the verdict hands back.
+ */
+const misleadingExhibits = computed(() => {
+    const ids = new Set(outcome.value?.truth.misleadingEvidenceIds ?? []);
+    return exhibits.value.filter((exhibit) => ids.has(exhibit.id)).map((exhibit) => exhibit.label);
+});
+
+async function focusStatement(): Promise<void> {
+    await nextTick();
+    statementRef.value?.focus();
+}
 
 function startTrial(): void {
     path.value = [];
     node.value = currentCase.value?.rootNode ?? null;
-    revealedEvidenceIds.value = [];
+    exhibits.value = currentCase.value?.evidence ?? [];
     outcome.value = null;
+    // Both of these were missed the first time. A hung turn left `turning` true
+    // forever, so a freshly generated case rendered with every choice disabled
+    // and no way back; and a failed turn's alert survived into the next run.
+    turning.value = false;
+    error.value = null;
 }
 
 async function choose(index: number): Promise<void> {
@@ -60,13 +104,14 @@ async function choose(index: number): Promise<void> {
             return;
         }
         path.value = attempted;
-        revealedEvidenceIds.value = turn.revealedEvidenceIds;
+        exhibits.value = turn.evidence;
         if (turn.status === "VERDICT") {
             node.value = null;
             outcome.value = { verdict: turn.verdict, score: turn.score, truth: turn.truth };
         } else {
             node.value = turn.node;
         }
+        void focusStatement();
     } catch (cause) {
         if (thisRun !== run) {
             return;
@@ -180,7 +225,12 @@ async function onFileChange(event: Event): Promise<void> {
             <img :src="currentCase.defendant.photoUrl" alt="The defendant" width="240" />
 
             <h3>Exhibits</h3>
-            <figure v-for="exhibit in currentCase.evidence" :key="exhibit.id">
+            <!-- Only what the trial has actually put in play. The case no longer
+                 arrives with the full set: reading every exhibit up front let a
+                 player cross-reference the clock against a witness claim and
+                 work out who was lying before the first question. -->
+            <p v-if="exhibits.length === 0">No exhibits entered yet.</p>
+            <figure v-for="exhibit in exhibits" :key="exhibit.id">
                 <img
                     v-if="exhibit.imageUrl"
                     :src="exhibit.imageUrl"
@@ -211,38 +261,50 @@ async function onFileChange(event: Event): Promise<void> {
                 </li>
             </ul>
 
-            <h3>The trial</h3>
-            <!-- Only the opening node ships with the case; every node after it
-                 arrives from POST /api/cases/:id/turn. -->
-            <div v-if="node" aria-live="polite">
-                <p>{{ node.speaker }}: {{ node.statement }}</p>
-                <p v-if="node.evidenceIds.length > 0">
-                    Exhibits in play: {{ node.evidenceIds.join(", ") }}
-                </p>
-                <ul>
-                    <!-- Keyed by position because the index IS the identifier
-                         the api takes back: choices carry no id of their own. -->
-                    <li v-for="(choice, index) in node.choices" :key="`${node.id}-${index}`">
-                        <button type="button" :disabled="turning" @click="choose(index)">
-                            {{ choice.text }}
-                        </button>
-                    </li>
-                </ul>
-            </div>
+            <h3>Examination</h3>
+            <!-- ONE live region, always mounted, with the branches inside it. A
+                 region only announces when it was already in the accessibility
+                 tree before its content changed, so putting aria-live on the
+                 two blocks that swap meant the verdict was never announced at
+                 all. -->
+            <div aria-live="polite">
+                <!-- Only the opening node ships with the case; every node after
+                     it arrives from POST /api/cases/:id/turn. -->
+                <template v-if="node">
+                    <!-- tabindex -1 so focus can be moved here after each turn;
+                         it is not in the tab order itself. -->
+                    <p ref="statementRef" tabindex="-1">{{ node.speaker }}: {{ node.statement }}</p>
+                    <p v-if="turning">Objection pending...</p>
+                    <ul aria-label="Respond">
+                        <!-- Keyed by position because the index IS the
+                             identifier the api takes back: choices carry no id
+                             of their own. -->
+                        <li v-for="(choice, index) in node.choices" :key="`${node.id}-${index}`">
+                            <!-- aria-disabled, not disabled: a disabled button
+                                 leaves the tab order and the accessibility tree
+                                 entirely, so an in-flight turn reads as the
+                                 controls vanishing. choose() already refuses a
+                                 second turn while one is running. -->
+                            <button type="button" :aria-disabled="turning" @click="choose(index)">
+                                {{ choice.text }}
+                            </button>
+                        </li>
+                    </ul>
+                </template>
 
-            <div v-else-if="outcome" aria-live="polite">
-                <h4>{{ outcome.verdict.replaceAll("_", " ") }}</h4>
-                <p>Defense score: {{ outcome.score }}/100</p>
-                <!-- The truth is the api's to hand over, and only here: this is
-                     the first moment the player is allowed to know it. -->
-                <p>What actually happened: {{ outcome.truth.summary }}</p>
-                <p v-if="outcome.truth.misleadingEvidenceIds.length > 0">
-                    Misleading exhibits: {{ outcome.truth.misleadingEvidenceIds.join(", ") }}
-                </p>
-                <button type="button" @click="startTrial">Try the case again</button>
+                <template v-else-if="outcome">
+                    <p ref="statementRef" tabindex="-1">VERDICT</p>
+                    <h4>{{ VERDICT_COPY[outcome.verdict] }}</h4>
+                    <p>Defense Performance: {{ outcome.score }}/100</p>
+                    <!-- The truth is the api's to hand over, and only here: this
+                         is the first moment the player is allowed to know it. -->
+                    <p>What actually happened: {{ outcome.truth.summary }}</p>
+                    <p v-if="misleadingExhibits.length > 0">
+                        Exhibits that misled the court: {{ misleadingExhibits.join("; ") }}
+                    </p>
+                    <button type="button" @click="startTrial">Retry This Case</button>
+                </template>
             </div>
-
-            <p>Revealed so far: {{ revealedEvidenceIds.join(", ") || "nothing yet" }}</p>
         </section>
     </main>
 </template>

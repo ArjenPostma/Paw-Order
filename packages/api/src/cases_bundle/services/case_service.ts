@@ -197,31 +197,33 @@ export async function findCaseStatus(id: string): Promise<CaseStatusResponse | n
     // The trial itself now leaves one node at a time: `nodes` carried the whole
     // effects table and every edge, and `verdictRules` the number to farm
     // towards. The player gets the opening node and posts back to /turn.
-    const {
-        truth: _truth,
-        witnesses,
-        evidence,
-        nodes,
-        rootNodeId,
-        verdictRules: _rules,
-        ...rest
-    } = entity.bible;
+    const { defendant, crime, witnesses, evidence, nodes, rootNodeId } = entity.bible;
 
     const rootNode = nodes.find((node) => node.id === rootNodeId);
     if (!rootNode) {
         // Unreachable for a stored bible: validateTree rejects a rootNodeId that
-        // is not a node. Answering "no case" beats serving a courtroom with no
-        // opening statement, and beats a non-null assertion.
+        // is not a node. Reported as FAILED rather than as a miss, because a 404
+        // reads as transient to the client's poll loop and it would keep asking
+        // for ten more seconds about a permanent condition.
         console.error(`[paw-order-api] case ${entity.id} is READY with no root node`);
-        return null;
+        return { id: entity.id, status: "FAILED" };
     }
 
+    // Listed field by field, never spread. `rest` would carry any field added
+    // to CaseBible later straight onto the wire, which is how a secret ships
+    // without anyone deciding to ship it.
+    const openingExhibits = new Set(rootNode.evidenceIds);
     return {
         status: "READY",
         id: entity.id,
-        ...rest,
+        defendant,
+        crime,
         rootNode: publicNode(rootNode),
-        evidence: evidence.map(({ imagePrompt: _prompt, ...exhibit }) => exhibit),
+        // Only what the opening statement puts in play. The rest arrive from
+        // /turn as the trial unlocks them.
+        evidence: evidence
+            .filter((exhibit) => openingExhibits.has(exhibit.id))
+            .map(({ imagePrompt: _prompt, ...exhibit }) => exhibit),
         witnesses: witnesses.map(({ reliable: _reliable, ...witness }) => witness),
     };
 }

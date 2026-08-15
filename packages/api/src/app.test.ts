@@ -124,7 +124,17 @@ describe("api wiring", () => {
             .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
 
         const ready = await pollUntilReady(created.body.id);
+        // Asserted BEFORE the absence checks. Four of the five assertions below
+        // are negative, and a negative passes on an empty body, an error body,
+        // or a case that shipped no choices at all - so without this the test
+        // stays green while the courtroom is unplayable.
+        expect(ready.body.status).toBe("READY");
+        expect(ready.body.rootNode.choices.length).toBeGreaterThan(0);
+
         const wire = JSON.stringify(ready.body);
+        // Under these names. The load-bearing check is the key-set assertion
+        // below; these catch a reintroduction anywhere in the payload, but not
+        // a rename.
         expect(wire).not.toContain("effects");
         expect(wire).not.toContain("nextNodeId");
         expect(wire).not.toContain("acquitAtDoubt");
@@ -134,6 +144,20 @@ describe("api wiring", () => {
             expect(choice.text).toBeTruthy();
             expect(Object.keys(choice)).toEqual(["text"]);
         }
+    });
+
+    // The reveal mechanic only means something if the exhibits are not all
+    // handed over at the door. E3's clock reads 14:22 and W1 claims 14:30, so
+    // shipping every exhibit up front let a player identify the lying witness
+    // before answering a single question (gamedesign.md 8).
+    it("ships only the exhibits the opening statement puts in play", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+
+        const ready = await pollUntilReady(created.body.id);
+        expect(ready.body.evidence.map((exhibit: { id: string }) => exhibit.id)).toEqual(["E1"]);
+        expect(JSON.stringify(ready.body)).not.toContain("14:22");
     });
 
     // The FAILED arm had no anchor at all, so a regression that served the bible
@@ -217,7 +241,9 @@ describe("trial turns", () => {
         expect(turn.status).toBe(200);
         expect(turn.body.status).toBe("NODE");
         expect(turn.body.node.id).toBe("N1");
-        expect(turn.body.revealedEvidenceIds).toEqual([]);
+        // The opening node cites E1, so that exhibit is in play from the start;
+        // nothing else is until a choice unlocks it.
+        expect(turn.body.evidence.map((exhibit: { id: string }) => exhibit.id)).toEqual(["E1"]);
         expect(turn.headers["cache-control"]).toBe("no-store");
     });
 
@@ -231,7 +257,11 @@ describe("trial turns", () => {
         expect(turn.body.status).toBe("NODE");
         expect(turn.body.node.id).toBe("N3");
         expect(turn.body.node.statement).toBeTruthy();
-        expect(turn.body.revealedEvidenceIds).toEqual(["E3"]);
+        // E1 was in play from the opening node, E3 is what this choice unlocked.
+        expect(turn.body.evidence.map((exhibit: { id: string }) => exhibit.id).sort()).toEqual([
+            "E1",
+            "E3",
+        ]);
         // Mid-trial the player sees the courtroom, not the scoreboard.
         expect(turn.body.verdict).toBeUndefined();
         expect(turn.body.score).toBeUndefined();
@@ -276,9 +306,36 @@ describe("trial turns", () => {
         const wire = JSON.stringify(turn.body);
         expect(wire).not.toContain("effects");
         expect(wire).not.toContain("nextNodeId");
+        // misleadingEvidenceIds is the one key that exists only inside Truth, so
+        // it catches a nested leak that `body.truth` being undefined would not -
+        // e.g. a debug field, or truth folded into the node.
+        expect(wire).not.toContain("misleadingEvidenceIds");
+        expect(turn.body.truth).toBeUndefined();
+        // The exact field set publicNode is supposed to produce. speaker and
+        // evidenceIds were asserted nowhere before this, so dropping either
+        // from that hand-listed block left every test green and the courtroom
+        // rendering "undefined:" at the player.
+        expect(Object.keys(turn.body.node).sort()).toEqual([
+            "choices",
+            "evidenceIds",
+            "id",
+            "speaker",
+            "statement",
+        ]);
         for (const choice of turn.body.node.choices) {
             expect(Object.keys(choice)).toEqual(["text"]);
         }
+    });
+
+    it("answers a malformed json body with 400 rather than 500", async () => {
+        const id = await readyCase();
+        const turn = await request(app)
+            .post(`/api/cases/${id}/turn`)
+            .set("Content-Type", "application/json")
+            .send('{"path":[');
+
+        expect(turn.status).toBe(400);
+        expect(turn.body.error).toBeTruthy();
     });
 
     // Every one of these is a body an anonymous caller can post.
