@@ -2,9 +2,11 @@ import type { Schema } from "@google/genai";
 import type { CaseBible, Evidence } from "@paw-order/shared";
 import { IMAGE_MODEL, TEXT_MODEL, encodeImage, generateImage, generateJson } from "@/ai/gemini";
 import type { EncodedImage, GeneratedImage } from "@/ai/gemini";
-import { resolveAppEnv } from "@/config/env";
+import { positiveIntEnv, resolveAppEnv } from "@/config/env";
 import { fixtureBible } from "@/cases_bundle/services/case_fixture";
 import {
+    DOG_CHECK_PROMPT,
+    DOG_SCHEMA,
     FACTS_SCHEMA,
     TREE_SCHEMA,
     factsPrompt,
@@ -168,6 +170,52 @@ async function renderEvidence(
     }
 
     return { evidence: rendered, storedKeys };
+}
+
+/**
+ * How long the upload request will wait on the dog check. It runs inside the
+ * POST, so this is a bound on the player's wait, not on a background job -
+ * short on purpose, and short enough that the fall-open below is reached long
+ * before any edge gives up on the request.
+ */
+const DOG_CHECK_TIMEOUT_MS = positiveIntEnv("DOG_CHECK_TIMEOUT_MS", 15_000);
+
+/** The one field DOG_SCHEMA asks for, narrowed off an untrusted response. */
+function saysDog(value: unknown): boolean {
+    return typeof value === "object" && value !== null && "isDog" in value && value.isDog === true;
+}
+
+/**
+ * Whether the photo has a dog in it, asked before anything is paid for.
+ *
+ * One cheap text call against the same photo the exhibits would be rendered
+ * from. It is the only guard between an anonymous upload and four paid calls,
+ * and the router mounts it ahead of both daily ceilings so a rejected photo
+ * spends neither.
+ *
+ * Fails OPEN. A model outage here would otherwise turn every upload away at the
+ * door, and it costs nothing to let one through: if Gemini is down, the facts
+ * stage is the next thing to run and it fails before an image is ever rendered.
+ */
+export async function looksLikeDog(photo: GeneratedImage): Promise<boolean> {
+    if (resolveAppEnv() === "test") {
+        // The suite must never reach Gemini. Same guard shape as r2.ts.
+        return true;
+    }
+
+    try {
+        const text = await generateJson(DOG_CHECK_PROMPT, DOG_SCHEMA, {
+            reference: encodeImage(photo),
+            signal: AbortSignal.timeout(DOG_CHECK_TIMEOUT_MS),
+        });
+        return saysDog(parseJson(text));
+    } catch (error: unknown) {
+        console.error(
+            `[paw-order-api] dog check did not answer (model=${TEXT_MODEL}), letting the upload through`,
+            error,
+        );
+        return true;
+    }
 }
 
 /**

@@ -1,4 +1,4 @@
-import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from "typeorm";
+import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from "typeorm";
 import type { CaseBible, CaseStatus } from "@paw-order/shared";
 
 /**
@@ -34,6 +34,24 @@ export class CaseEntity {
      */
     @Column({ type: "varchar", length: 16, default: "PENDING" })
     status!: CaseStatus;
+
+    /**
+     * sha256 of the uploaded bytes together with the defendant name, so the same
+     * photo submitted twice returns the case already generated for it rather
+     * than paying for a second one.
+     *
+     * The name is inside the digest, not beside it: the prompts write it through
+     * the whole bible - the charge, the title, the timeline, every witness claim
+     * and every node - so a case generated for one name cannot be relabelled
+     * with another without rewriting model prose.
+     *
+     * Nullable because rows written before the column existed have no hash, and
+     * deliberately NOT unique: a FAILED row keeps its hash, and the re-upload
+     * that follows must be free to insert the same one.
+     */
+    @Index()
+    @Column({ type: "varchar", length: 64, nullable: true })
+    photoHash!: string | null;
 
     // TIMESTAMP without time zone (see the generated migration): the stored
     // instant carries no offset, so it is only meaningful because every writer

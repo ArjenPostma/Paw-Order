@@ -26,6 +26,46 @@ export const DEFAULT_DEFENDANT_NAME = "The dog";
 /** Kept out of both prompts' way: the model never sets these. */
 const NUMBER = { type: Type.NUMBER } as const;
 const STRING = { type: Type.STRING } as const;
+
+/**
+ * The gate on the upload, answered before a single paid stage runs. One boolean
+ * and nothing else: anything the model could write here is thrown away, and a
+ * larger schema is a larger response to wait for while the POST is held open.
+ */
+export const DOG_SCHEMA: Schema = {
+    type: Type.OBJECT,
+    required: ["isDog"],
+    properties: { isDog: { type: Type.BOOLEAN } },
+};
+
+/**
+ * Deliberately generous. The point is to turn away the photo that has no dog in
+ * it at all - a selfie, a landscape, a screenshot - not to adjudicate what a
+ * real dog is. A plush dog, a cartoon, a statue and a dog in a hat all get their
+ * day in court, and the whole game works on them: the image model renders
+ * exhibits from the reference either way.
+ *
+ * Erring the other way costs more than it saves. A false reject is a player
+ * turned away from a photo that would have played fine, on the very first
+ * screen, with no way to argue; a false accept costs one case's generation.
+ */
+export const DOG_CHECK_PROMPT = `Look at the image. Answer whether there is a dog in it.
+
+Count as a dog, and answer true:
+- a real dog or puppy, of any breed, any age, at any distance
+- a plush dog, a toy dog, a figurine, a statue
+- a drawing, painting, cartoon or sculpture of a dog
+- a dog in costume, in a hat, or wearing clothes
+- a dog partly out of frame, blurred, dark, or asleep
+- a photo of a photo of a dog, or a screen showing a dog
+
+If an ordinary person would point at the image and say "that's a dog", it is a
+dog. Breed accuracy does not matter. Image quality does not matter.
+
+Answer false only when there is no dog in the image at all: a person on their
+own, a different animal, a place, a meal, an object, a screenshot, or text.
+
+Return {"isDog": true} or {"isDog": false} and nothing else.`;
 const STRING_LIST: Schema = { type: Type.ARRAY, items: { type: Type.STRING } };
 
 export const FACTS_SCHEMA: Schema = {

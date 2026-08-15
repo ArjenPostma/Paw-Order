@@ -16,6 +16,7 @@ export default defineConfig({
         env: {
             APP_ENV: "test",
             GENERATION_MAX_PER_MINUTE: "1000",
+            GENERATION_MAX_PER_IP_PER_DAY: "1000",
             GENERATION_MAX_PER_DAY: "1000",
             GENERATION_MAX_CONCURRENT: "50",
         },

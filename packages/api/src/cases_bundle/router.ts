@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Router } from "express";
 import type { RequestHandler } from "express";
 import multer, { MulterError } from "multer";
@@ -6,17 +7,32 @@ import {
     GenerationBusyError,
     createCase,
     findCaseStatus,
+    findReusableCase,
     generationSlotsAvailable,
 } from "@/cases_bundle/services/case_service";
+import { looksLikeDog } from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
 import { playTurn } from "@/cases_bundle/services/trial_service";
 import { dailyBudget, rateLimit } from "@/http/rate_limit";
 
+// Declaration merging rather than a cast onto the request: reuseExistingCase
+// already hashed the photo and the route handler needs that digest to store on
+// the row, and hashing 8MB a second time to avoid one interface is the wrong
+// saving.
+declare module "express-serve-static-core" {
+    interface Request {
+        /** Set by reuseExistingCase when the photo turned out to be new. */
+        photoHash?: string;
+    }
+}
+
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+const DAY_MS = 24 * 60 * 60 * 1000;
 /** Long enough for any dog's name, short enough that it cannot be a paragraph. */
 const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
+const NOT_A_DOG = "This court only tries dogs. Try a photo of one.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // C0, DEL and C1, plus the invisible formatting characters. The formatting ones
 // are not control characters and not \s, so without them here a name of 32 zero
@@ -72,6 +88,24 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
 const perIpLimiter = rateLimit({
     windowMs: 60_000,
     max: positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
+});
+/**
+ * The second ceiling on the same ip, over a 24h window rather than a minute.
+ * The per-minute limiter stops a burst; this is what stops one caller walking
+ * steadily through the whole day's budget at one case a minute.
+ *
+ * Only new cases are capped. Replaying costs no generation and does not come
+ * through this route at all, so a player who has spent both still has every
+ * case they have ever played.
+ *
+ * ponytail: shares rate_limit.ts's in-process state, so it resets on deploy -
+ * and its MAX_TRACKED_IPS backstop clears the whole map wholesale, which over a
+ * 24h window means 10k distinct ips resets everyone's daily allowance. The
+ * global budget below is the ceiling that still holds in that case.
+ */
+const perIpDailyLimiter = rateLimit({
+    windowMs: DAY_MS,
+    max: positiveIntEnv("GENERATION_MAX_PER_IP_PER_DAY", 2),
 });
 const globalDailyBudget = dailyBudget({
     dailyMax: positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
@@ -131,19 +165,90 @@ const requirePhoto: RequestHandler = (req, res, next) => {
     next();
 };
 
+/**
+ * Hands back the case already generated for these exact bytes under this exact
+ * name, rather than paying for a second one.
+ *
+ * Mounted ahead of the dog check and both daily ceilings on purpose: a reuse
+ * generates nothing, so it must not spend a model call or a slot from either.
+ * That also means re-uploading a photo you have already played never costs you
+ * one of your two cases for the day.
+ *
+ * The name goes into the digest because the prompts write it through the whole
+ * bible, so the same dog under a new name is a different case rather than a
+ * relabelled one. sanitiseName runs first for the same reason the route uses it:
+ * two names that reach the generator identically must hash identically.
+ */
+const reuseExistingCase: RequestHandler = async (req, res, next) => {
+    const file = req.file;
+    if (!file) {
+        next();
+        return;
+    }
+
+    // The NUL separator is what stops ("ab", "c") and ("a", "bc") colliding.
+    // sanitiseName has already stripped control characters, so no name can
+    // contain one.
+    const photoHash = createHash("sha256")
+        .update(file.buffer)
+        .update("\0")
+        .update(sanitiseName(req.body))
+        .digest("hex");
+
+    const existing = await findReusableCase(photoHash);
+    if (existing) {
+        // 200, not 202: nothing was accepted for generation. The client polls
+        // on either, so a PENDING hit is a double-submit joining the run
+        // already going rather than starting a second one.
+        res.status(200).json(existing);
+        return;
+    }
+
+    req.photoHash = photoHash;
+    next();
+};
+
+/**
+ * Turns away a photo with no dog in it before anything is paid for.
+ *
+ * Ahead of both daily ceilings, so a rejected photo spends neither. Behind
+ * reuseExistingCase, so a photo already tried in this court is never asked
+ * about twice.
+ *
+ * Its own cost is bounded by the per-minute limiter above and nothing else -
+ * one text call per upload attempt, against ~$0.11 for the generation it stands
+ * in front of.
+ */
+const requireDog: RequestHandler = async (req, res, next) => {
+    const file = req.file;
+    if (!file) {
+        next();
+        return;
+    }
+    if (await looksLikeDog({ bytes: file.buffer, mimeType: file.mimetype })) {
+        next();
+        return;
+    }
+    res.status(400).json({ error: NOT_A_DOG });
+};
+
 export const casesRouter = Router();
 
-// Order is load-bearing, cheapest rejection first. The daily budget comes LAST
-// because it is the ceiling that actually bounds the model bill: charging it
-// before the body was parsed meant 50 photoless POSTs could burn the entire
-// day's quota and lock out every real player for 24 hours at zero cost to the
-// caller. A slot is now only ever spent on a request that is about to generate.
+// Order is load-bearing, cheapest rejection first, and every ceiling sits
+// behind every check that can reject the request without generating anything:
+// charging the daily budget before the body was parsed meant 50 photoless POSTs
+// could burn the entire day's quota and lock out every real player for 24 hours
+// at zero cost to the caller. A slot is only ever spent on a request that is
+// about to generate - which is why reuse and the dog check both come first.
 casesRouter.post(
     "/",
     perIpLimiter,
     rejectWhenBusy,
     uploadPhoto,
     requirePhoto,
+    reuseExistingCase,
+    requireDog,
+    perIpDailyLimiter,
     globalDailyBudget,
     async (req, res) => {
         const file = req.file;
@@ -160,6 +265,10 @@ casesRouter.post(
                 // multer parses text fields onto req.body; anything else in
                 // there is ignored, and an absent name is the default.
                 sanitiseName(req.body),
+                // Set by reuseExistingCase, which cannot have been skipped: a
+                // request without a file never gets past requirePhoto. Stored
+                // so the NEXT identical upload finds this case.
+                req.photoHash ?? null,
             );
             res.status(202).json(accepted);
         } catch (error: unknown) {
