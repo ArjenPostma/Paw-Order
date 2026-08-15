@@ -4,13 +4,36 @@ import { ref } from "vue";
 defineProps<{ error: string | null }>();
 const emit = defineEmits<{ photo: [file: File] }>();
 
+// Mirrors what the api accepts. The api re-checks both and stays the authority;
+// this exists because a rejected upload still costs the caller their one
+// generation per minute, so the round trip is worth not making.
+const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const MAX_BYTES = 8 * 1024 * 1024;
+
 // Drag state is local: nothing above this screen cares that a file is hovering.
 const dragging = ref(false);
+const rejected = ref<string | null>(null);
 
+/**
+ * The one filter both entry points share. `accept="image/*"` constrains the
+ * picker's default view and nothing else - a drop bypasses it entirely, and the
+ * picker itself lets a determined user switch to "All Files" - so neither path
+ * can be trusted to have filtered anything.
+ */
 function take(file: File | undefined): void {
-    if (file) {
-        emit("photo", file);
+    if (!file) {
+        return;
     }
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+        rejected.value = "That is not a photo. Use a JPG, PNG or WebP.";
+        return;
+    }
+    if (file.size > MAX_BYTES) {
+        rejected.value = "That photo is over 8MB. Try a smaller one.";
+        return;
+    }
+    rejected.value = null;
+    emit("photo", file);
 }
 
 function onFileChange(event: Event): void {
@@ -70,10 +93,14 @@ function onDrop(event: DragEvent): void {
             <input class="envelope__input" type="file" accept="image/*" @change="onFileChange" />
             <span class="field-label">Exhibit A &middot; the defendant</span>
             <span class="envelope__action">Choose a dog photo</span>
-            <span class="envelope__hint">or drop one here &middot; JPG or PNG, up to 8MB</span>
+            <span class="envelope__hint">
+                or drop one here &middot; JPG, PNG or WebP, up to 8MB
+            </span>
         </label>
 
-        <p v-if="error" class="upload__error" role="alert">{{ error }}</p>
+        <p v-if="rejected || error" class="upload__error" role="alert">
+            {{ rejected ?? error }}
+        </p>
     </main>
 </template>
 

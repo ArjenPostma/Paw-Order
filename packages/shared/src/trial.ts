@@ -11,12 +11,16 @@
  */
 
 import type {
+    Evidence,
     GameEffects,
     GameState,
+    PublicEvidence,
     PublicTrialNode,
+    PublicWitness,
     TrialNode,
     Verdict,
     VerdictRules,
+    Witness,
 } from "./case.js";
 
 export interface TrialTurn {
@@ -126,6 +130,48 @@ export function publicNode(node: TrialNode): PublicTrialNode {
     };
 }
 
+/**
+ * Strips an exhibit for the wire. Hand-written for the same reason publicNode
+ * is: the rest-spread this replaces (`({ imagePrompt: _prompt, ...exhibit })`)
+ * carries every field added to Evidence later, so a field naming who planted an
+ * exhibit would ship with no compile error and no test failure.
+ */
+export function publicEvidence(exhibit: Evidence): PublicEvidence {
+    return {
+        id: exhibit.id,
+        label: exhibit.label,
+        imageUrl: exhibit.imageUrl,
+        visualFacts: exhibit.visualFacts,
+    };
+}
+
+/** Same, for a witness: the claim, never `reliable`, never anything added later. */
+export function publicWitness(witness: Witness): PublicWitness {
+    return { id: witness.id, name: witness.name, claim: witness.claim };
+}
+
+/**
+ * What `reasonableDoubtAtDoubt` replaced: the line used to be derived as half
+ * the acquittal threshold rather than stored.
+ */
+const LEGACY_REASONABLE_DOUBT_FRACTION = 0.5;
+
+/**
+ * The reasonable-doubt line, tolerating a bible written before that line was
+ * stored. The whole Case Bible is one json column that nothing migrates and
+ * nothing re-validates on read, so its shape is a claim rather than a fact:
+ * a pre-existing row carries only acquitAtDoubt and suspiciousAtSuspicion, and
+ * a bare `state.doubt >= rules.reasonableDoubtAtDoubt` reads undefined, compares
+ * false, and silently convicts outright where the case used to allow reasonable
+ * doubt. Falling back to the old derivation keeps those cases playing as they
+ * were generated.
+ */
+function reasonableDoubtLine(rules: VerdictRules): number {
+    return Number.isFinite(rules.reasonableDoubtAtDoubt)
+        ? rules.reasonableDoubtAtDoubt
+        : rules.acquitAtDoubt * LEGACY_REASONABLE_DOUBT_FRACTION;
+}
+
 export function resolveVerdict(state: GameState, rules: VerdictRules): Verdict {
     if (state.doubt >= rules.acquitAtDoubt) {
         return state.suspicion >= rules.suspiciousAtSuspicion
@@ -134,7 +180,7 @@ export function resolveVerdict(state: GameState, rules: VerdictRules): Verdict {
     }
     // Suspicion only ever taints an acquittal. A convicted defendant being
     // suspicious on top is not a fifth verdict.
-    return state.doubt >= rules.reasonableDoubtAtDoubt ? "GUILTY_BUT_REASONABLE_DOUBT" : "GUILTY";
+    return state.doubt >= reasonableDoubtLine(rules) ? "GUILTY_BUT_REASONABLE_DOUBT" : "GUILTY";
 }
 
 /**
@@ -210,12 +256,19 @@ export function deriveVerdictRules(endings: GameState[]): VerdictRules | null {
         return null;
     }
     const acquitAtDoubt = splitAbove(doubts, ACQUIT_QUANTILE, lowest);
-    const reasonableDoubtAtDoubt = splitAbove(doubts, REASONABLE_DOUBT_QUANTILE, lowest);
-    // Both are null together: nothing above the lowest total means every run in
-    // the tree ends on the same doubt, which is the one case worth rejecting.
-    if (acquitAtDoubt === null || reasonableDoubtAtDoubt === null) {
+    // Null means nothing sits above the lowest total, so every run in the tree
+    // ends on the same doubt - the one case worth rejecting.
+    if (acquitAtDoubt === null) {
         return null;
     }
+    // Drawn from the runs BETWEEN the two extremes, not from the whole list.
+    // Two independent quantiles over one list can land on the same value, which
+    // empties the middle band and makes GUILTY_BUT_REASONABLE_DOUBT unreachable
+    // while both lines still look placed. When no run falls between them the
+    // tree has no middle band to offer, and the lines coincide honestly.
+    const middle = doubts.filter((doubt) => doubt > lowest && doubt < acquitAtDoubt);
+    const reasonableDoubtAtDoubt =
+        splitAbove(middle, REASONABLE_DOUBT_QUANTILE, lowest) ?? acquitAtDoubt;
 
     // Only the runs that acquit matter here: the threshold's whole job is to
     // split those into clean and tainted.

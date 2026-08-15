@@ -55,15 +55,24 @@ export interface Witness {
     reliable: boolean;
 }
 
-/** A witness as the courtroom sees one: the claim, not whether it is true. */
-export type PublicWitness = Omit<Witness, "reliable">;
+/**
+ * A witness as the courtroom sees one: the claim, not whether it is true.
+ *
+ * Pick, not Omit, for the reason spelled out on PublicCase: an Omit ships every
+ * field added to Witness later, so a field like `motive` would reach the wire
+ * with no compile error and no test failure. With Pick a new field is visible
+ * only when someone names it here on purpose.
+ */
+export type PublicWitness = Pick<Witness, "id" | "name" | "claim">;
 
 /**
  * An exhibit as the courtroom sees one. `imagePrompt` is kept server-side for
  * regeneration; nothing renders it, and it is model prose from the same call
  * that wrote the hidden truth, so it has no business on the wire.
+ *
+ * Pick rather than Omit, for the same fail-open reason as PublicWitness.
  */
-export type PublicEvidence = Omit<Evidence, "imagePrompt">;
+export type PublicEvidence = Pick<Evidence, "id" | "label" | "imageUrl" | "visualFacts">;
 
 /** State deltas applied when a choice is taken. Negative values allowed. */
 export interface GameEffects {
@@ -95,13 +104,15 @@ export interface TrialNode {
  * which put ~80% of runs on NOT_GUILTY and left NOT_GUILTY_BUT_SUSPICIOUS
  * unreachable across every case sampled.
  *
- * The doubt lines are guaranteed to divide the tree; the suspicion one is not.
- * When every acquitting run carries the same suspicion there is no value that
- * taints some and spares others, and the threshold goes out of reach rather
- * than tainting them all - so NOT_GUILTY_BUT_SUSPICIOUS can still be a dead
- * verdict on an individual case. That is left to the tree prompt, which asks
- * for suspicion to vary, rather than rejected here: a whole regeneration is too
- * much to spend on which flavour of acquittal a case can reach.
+ * A case is guaranteed to reach at least two verdicts - acquitAtDoubt always
+ * sits above the lowest run - but not all four. When no run falls between the
+ * two doubt lines they coincide and GUILTY_BUT_REASONABLE_DOUBT is unreachable;
+ * when every acquitting run carries the same suspicion there is no value that
+ * taints some and spares others, so the suspicion threshold goes out of reach
+ * rather than tainting them all and NOT_GUILTY_BUT_SUSPICIOUS goes dead. Both
+ * are left to the tree prompt, which asks for the totals to spread, rather than
+ * rejected here: a whole regeneration is too much to spend on which flavour of
+ * verdict one case happens to offer.
  */
 export interface VerdictRules {
     /** Doubt at or above this acquits. */

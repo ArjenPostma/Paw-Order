@@ -1,5 +1,5 @@
 import type { CaseAccepted, CaseBible, CaseStatusResponse } from "@paw-order/shared";
-import { publicNode } from "@paw-order/shared";
+import { publicEvidence, publicNode, publicWitness } from "@paw-order/shared";
 import type { GeneratedImage } from "@/ai/gemini";
 import { positiveIntEnv } from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
@@ -66,7 +66,16 @@ function placeholderBible(photoUrl: string): CaseBible {
         witnesses: [],
         nodes: [],
         rootNodeId: "",
-        verdictRules: { acquitAtDoubt: 0, reasonableDoubtAtDoubt: 0, suspiciousAtSuspicion: 0 },
+        // Out of reach on purpose. All-zero thresholds fail OPEN - every state
+        // satisfies `doubt >= 0` - so a placeholder that ever reached a verdict
+        // would acquit. Nothing reaches it today (findCaseStatus and playTurn
+        // both gate on READY, and replayRun gates again on the empty root), but
+        // a bible that is by definition not a case should refuse to acquit.
+        verdictRules: {
+            acquitAtDoubt: Number.MAX_SAFE_INTEGER,
+            reasonableDoubtAtDoubt: Number.MAX_SAFE_INTEGER,
+            suspiciousAtSuspicion: Number.MAX_SAFE_INTEGER,
+        },
     };
 }
 
@@ -221,9 +230,7 @@ export async function findCaseStatus(id: string): Promise<CaseStatusResponse | n
         rootNode: publicNode(rootNode),
         // Only what the opening statement puts in play. The rest arrive from
         // /turn as the trial unlocks them.
-        evidence: evidence
-            .filter((exhibit) => openingExhibits.has(exhibit.id))
-            .map(({ imagePrompt: _prompt, ...exhibit }) => exhibit),
-        witnesses: witnesses.map(({ reliable: _reliable, ...witness }) => witness),
+        evidence: evidence.filter((exhibit) => openingExhibits.has(exhibit.id)).map(publicEvidence),
+        witnesses: witnesses.map(publicWitness),
     };
 }

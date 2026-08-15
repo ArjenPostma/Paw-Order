@@ -210,6 +210,7 @@ async function onPhoto(file: File): Promise<void> {
         :turning="turning"
         :error="error"
         @choose="choose"
+        @abandon="takeAnotherCase"
     />
 
     <VerdictScreen

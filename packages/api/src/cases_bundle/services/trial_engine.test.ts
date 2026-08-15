@@ -129,6 +129,17 @@ describe("resolveVerdict", () => {
     it("ignores suspicion on a conviction", () => {
         expect(resolveVerdict(stateWith(0, 99), RULES)).toBe("GUILTY");
     });
+
+    it("falls back to half the acquittal line when the stored one is unusable", () => {
+        // Bibles written before reasonableDoubtAtDoubt existed carry only the
+        // other two thresholds, and the bible is a json column that nothing
+        // migrates or re-validates. NaN stands in for that absent value here
+        // because the field is typed as required; both reach the same guard,
+        // and a bare comparison against either convicts outright.
+        const legacy = { ...RULES, reasonableDoubtAtDoubt: Number.NaN };
+        expect(resolveVerdict(stateWith(30, 0), legacy)).toBe("GUILTY_BUT_REASONABLE_DOUBT");
+        expect(resolveVerdict(stateWith(29, 0), legacy)).toBe("GUILTY");
+    });
 });
 
 describe("pathBounds", () => {
@@ -269,6 +280,25 @@ describe("deriveVerdictRules", () => {
 
         const reached = new Set(endings.map((state) => resolveVerdict(state, rules!)));
         expect(reached.has("GUILTY")).toBe(true);
+    });
+
+    it("does not place both doubt lines on the same value", () => {
+        // Two early concessions at 10 and six runs converging on 20. Drawing
+        // both quantiles from one list put each on 20, which empties the middle
+        // band while both lines still look placed. The lines may coincide only
+        // when no run falls between them - as here - and GUILTY must survive it.
+        const endings = [10, 10, 20, 20, 20, 20, 20, 20].map((doubt) => ({
+            doubt,
+            credibility: 0,
+            suspicion: 0,
+            revealedEvidenceIds: [],
+        }));
+        const rules = deriveVerdictRules(endings);
+        expect(rules).toBeDefined();
+
+        const reached = new Set(endings.map((state) => resolveVerdict(state, rules!)));
+        expect(reached.has("GUILTY")).toBe(true);
+        expect(reached.has("NOT_GUILTY")).toBe(true);
     });
 
     it("refuses a tree whose runs all total the same doubt", () => {

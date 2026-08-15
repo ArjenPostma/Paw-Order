@@ -13,7 +13,7 @@ const props = defineProps<{
     turning: boolean;
     error: string | null;
 }>();
-defineEmits<{ choose: [index: number] }>();
+defineEmits<{ choose: [index: number]; abandon: [] }>();
 
 const SPEAKER_NAMES = {
     PROSECUTOR: "Prosecutor",
@@ -110,7 +110,17 @@ onMounted(() => statementRef.value?.focus());
                         </li>
                     </ul>
 
-                    <p v-if="error" class="examination__error" role="alert">{{ error }}</p>
+                    <!-- The only way out of the courtroom that does not need a
+                         working turn. Without it a request that never resolves
+                         leaves `turning` true, every choice refusing, and the
+                         "Take another case" button on the verdict screen the
+                         player can no longer reach - so recovery is a reload. -->
+                    <p v-if="error" class="examination__error" role="alert">
+                        {{ error }}
+                        <button class="examination__bail" type="button" @click="$emit('abandon')">
+                            Abandon this case
+                        </button>
+                    </p>
                 </section>
 
                 <aside class="rail">
@@ -348,6 +358,27 @@ onMounted(() => statementRef.value?.focus());
     border-left: 3px solid var(--stamp);
     padding-left: 0.75rem;
     margin: 1rem 0 0;
+}
+
+.examination__bail {
+    display: block;
+    margin-top: 0.6rem;
+    padding: 0.5rem 0.9rem;
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    transition:
+        background 140ms ease,
+        color 140ms ease;
+}
+
+.examination__bail:hover {
+    background: var(--ink);
+    color: var(--paper);
 }
 
 .rail {
