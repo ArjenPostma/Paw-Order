@@ -15,7 +15,7 @@ import type { Crime, Evidence, TrialNode, Truth, VerdictRules, Witness } from "@
  * detail while citing a legitimate evidence id passes here.
  */
 
-export const EVIDENCE_COUNT = 4;
+export const EVIDENCE_COUNT = 3;
 export const WITNESS_COUNT = 2;
 /** Bounds one choice's contribution so the running score cannot be blown open. */
 const MAX_EFFECT_MAGNITUDE = 25;
@@ -30,6 +30,17 @@ const MIN_NODES = 4;
 const MAX_NODES = 24;
 const MIN_CHOICES = 2;
 const MAX_CHOICES = 4;
+const MIN_TIMELINE = 4;
+const MAX_TIMELINE = 6;
+const MAX_VISUAL_FACTS = 4;
+/**
+ * The whole bible lands in one json column and is then served under a one-year
+ * immutable cache, so every string and every array needs a ceiling. Without
+ * these a response with a 200KB statement, or 10,000 repeats of "E1" in
+ * evidenceIds, validates clean and is persisted wholesale.
+ */
+const MAX_STRING_LENGTH = 2000;
+const MAX_ARRAY_LENGTH = 32;
 const SPEAKERS = ["PROSECUTOR", "JUDGE", "WITNESS"] as const;
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; errors: string[] };
@@ -58,6 +69,19 @@ function isFilledString(value: unknown): value is string {
     return typeof value === "string" && value.trim().length > 0;
 }
 
+/**
+ * Model text is echoed into two places that treat newlines as structure: the
+ * console (one finding per line) and the retry prompt (a bulleted list the next
+ * attempt reads as operator instructions). A value carrying newlines can forge
+ * an entry in either, so strip control characters and cap the length before any
+ * model-supplied string appears inside an error message.
+ */
+function quoteModelValue(value: string): string {
+    // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+    const flattened = value.replace(/[\u0000-\u001F\u007F]+/g, " ").trim();
+    return flattened.length > 60 ? `${flattened.slice(0, 60)}...` : flattened;
+}
+
 class Checker {
     readonly errors: string[] = [];
 
@@ -80,23 +104,35 @@ class Checker {
 
     string(source: Record<string, unknown>, key: string, path: string): string {
         const value = source[key];
-        if (isFilledString(value)) {
-            return value.trim();
+        if (!isFilledString(value)) {
+            this.errors.push(`${path}.${key} must be a non-empty string`);
+            return "";
         }
-        this.errors.push(`${path}.${key} must be a non-empty string`);
-        return "";
+        const trimmed = value.trim();
+        if (trimmed.length > MAX_STRING_LENGTH) {
+            this.errors.push(
+                `${path}.${key} must be at most ${String(MAX_STRING_LENGTH)} characters, got ${String(trimmed.length)}`,
+            );
+            return "";
+        }
+        return trimmed;
     }
 
-    /** Nullable string: null is meaningful (a choice that ends the trial). */
+    /**
+     * Only an explicit null means "this choice ends the trial". A MISSING key is
+     * an error, not an ending: silently mapping undefined to null turned an
+     * omitted required field into an early exit that also satisfied the
+     * "trial never ends" guard, so the defect concealed itself.
+     */
     nullableString(source: Record<string, unknown>, key: string, path: string): string | null {
         const value = source[key];
-        if (value === null || value === undefined) {
+        if (value === null) {
             return null;
         }
-        if (isFilledString(value)) {
+        if (isFilledString(value) && value.trim().length <= MAX_STRING_LENGTH) {
             return value.trim();
         }
-        this.errors.push(`${path}.${key} must be a non-empty string or null`);
+        this.errors.push(`${path}.${key} must be a non-empty string or an explicit null`);
         return null;
     }
 
@@ -120,9 +156,15 @@ class Checker {
 
     strings(source: Record<string, unknown>, key: string, path: string): string[] {
         const raw = this.array(source[key], `${path}.${key}`);
+        if (raw.length > MAX_ARRAY_LENGTH) {
+            this.errors.push(
+                `${path}.${key} must hold at most ${String(MAX_ARRAY_LENGTH)} entries, got ${String(raw.length)}`,
+            );
+            return [];
+        }
         const out: string[] = [];
         raw.forEach((item, index) => {
-            if (isFilledString(item)) {
+            if (isFilledString(item) && item.trim().length <= MAX_STRING_LENGTH) {
                 out.push(item.trim());
             } else {
                 this.errors.push(`${path}.${key}[${index}] must be a non-empty string`);
@@ -160,8 +202,13 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
         location: check.string(crimeSource, "location", "facts.crime"),
         timeline: check.strings(crimeSource, "timeline", "facts.crime"),
     };
-    if (crime.timeline.length < 3) {
-        check.errors.push("facts.crime.timeline needs at least 3 entries");
+    // Matches what FACTS_SCHEMA asks for. They disagreed before: the schema said
+    // 4-6 and the validator accepted 3 with no upper bound, so the schema was the
+    // only thing enforcing it and a response that ignored the schema went through.
+    if (crime.timeline.length < MIN_TIMELINE || crime.timeline.length > MAX_TIMELINE) {
+        check.errors.push(
+            `facts.crime.timeline must hold between ${String(MIN_TIMELINE)} and ${String(MAX_TIMELINE)} entries, got ${String(crime.timeline.length)}`,
+        );
     }
 
     const evidenceSource = check.array(root.evidence, "facts.evidence");
@@ -174,10 +221,13 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
         const path = `facts.evidence[${String(index)}]`;
         const source = check.record(item, path);
         const visualFacts = check.strings(source, "visualFacts", path);
-        if (visualFacts.length === 0) {
+        if (visualFacts.length === 0 || visualFacts.length > MAX_VISUAL_FACTS) {
             // The trial may only cite what an exhibit shows, so an exhibit that
-            // shows nothing is unusable (gamedesign.md §13).
-            check.errors.push(`${path}.visualFacts needs at least one visible fact`);
+            // shows nothing is unusable (gamedesign.md §13); the ceiling matches
+            // what FACTS_SCHEMA asks for.
+            check.errors.push(
+                `${path}.visualFacts must hold between 1 and ${String(MAX_VISUAL_FACTS)} visible facts, got ${String(visualFacts.length)}`,
+            );
         }
         return {
             id: check.string(source, "id", path),
@@ -218,7 +268,9 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
     );
     for (const id of misleadingEvidenceIds) {
         if (!evidenceIds.has(id)) {
-            check.errors.push(`facts.truth.misleadingEvidenceIds cites unknown exhibit ${id}`);
+            check.errors.push(
+                `facts.truth.misleadingEvidenceIds cites unknown exhibit ${quoteModelValue(id)}`,
+            );
         }
     }
     const truth: Truth = {
@@ -247,7 +299,7 @@ export function validateTree(
         const ids = check.strings(source, key, path);
         for (const id of ids) {
             if (!knownEvidenceIds.has(id)) {
-                check.errors.push(`${path}.${key} cites unknown exhibit ${id}`);
+                check.errors.push(`${path}.${key} cites unknown exhibit ${quoteModelValue(id)}`);
             }
         }
         return ids;
@@ -322,13 +374,13 @@ export function validateTree(
 
     const rootNodeId = check.string(root, "rootNodeId", "tree");
     if (rootNodeId && !byId.has(rootNodeId)) {
-        check.errors.push(`tree.rootNodeId ${rootNodeId} is not a node`);
+        check.errors.push(`tree.rootNodeId ${quoteModelValue(rootNodeId)} is not a node`);
     }
     for (const node of nodes) {
         for (const choice of node.choices) {
             if (choice.nextNodeId !== null && !byId.has(choice.nextNodeId)) {
                 check.errors.push(
-                    `tree node ${node.id} points at unknown node ${choice.nextNodeId}`,
+                    `tree node ${quoteModelValue(node.id)} points at unknown node ${quoteModelValue(choice.nextNodeId)}`,
                 );
             }
         }
@@ -374,7 +426,7 @@ export function validateTree(
     }
     for (const node of nodes) {
         if (!reached.has(node.id)) {
-            check.errors.push(`tree node ${node.id} is unreachable from the root`);
+            check.errors.push(`tree node ${quoteModelValue(node.id)} is unreachable from the root`);
         }
     }
 

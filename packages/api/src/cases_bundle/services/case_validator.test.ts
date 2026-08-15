@@ -53,7 +53,7 @@ describe("validateFacts", () => {
             }),
         );
         expect(result.ok).toBe(false);
-        expect(errorsOf(result)).toContain("exactly 4");
+        expect(errorsOf(result)).toContain("exactly 3");
     });
 
     it("rejects a hidden truth that cites an exhibit that does not exist", () => {

@@ -46,9 +46,24 @@ export interface Witness {
     id: string;
     name: string;
     claim: string;
-    /** Set by the generator; drives contradiction scoring. */
+    /**
+     * Set by the generator; drives contradiction scoring. Truth-derived, so it
+     * is stripped from PublicWitness - a client that can read which witness is
+     * lying has been handed the answer (gamedesign.md §8 lists "the witness is
+     * lying" as one of the hidden truths).
+     */
     reliable: boolean;
 }
+
+/** A witness as the courtroom sees one: the claim, not whether it is true. */
+export type PublicWitness = Omit<Witness, "reliable">;
+
+/**
+ * An exhibit as the courtroom sees one. `imagePrompt` is kept server-side for
+ * regeneration; nothing renders it, and it is model prose from the same call
+ * that wrote the hidden truth, so it has no business on the wire.
+ */
+export type PublicEvidence = Omit<Evidence, "imagePrompt">;
 
 /** State deltas applied when a choice is taken. Negative values allowed. */
 export interface GameEffects {
@@ -109,7 +124,13 @@ export interface CaseBible {
  * checking), so `return { id, ...bible }` would typecheck and ship the answer.
  * With never, Truth is not assignable and that regression is a compile error.
  */
-export type PublicCase = Omit<CaseBible, "truth"> & { id: string; truth?: never };
+export type PublicCase = Omit<CaseBible, "truth" | "witnesses" | "evidence"> & {
+    id: string;
+    truth?: never;
+    /** Narrowed, not inherited: see PublicWitness and PublicEvidence. */
+    witnesses: PublicWitness[];
+    evidence: PublicEvidence[];
+};
 
 export const CASE_STATUSES = ["PENDING", "READY", "FAILED"] as const;
 
@@ -123,12 +144,16 @@ export interface CaseAccepted {
 
 /**
  * What GET /api/cases/:id answers. Generation is asynchronous (a bible plus
- * four image calls runs far past any edge timeout), so the client polls this.
+ * its exhibit images runs far past any edge timeout), so the client polls this.
  * Only the READY arm carries the case, which is what stops a half-generated
  * bible — empty nodes, no rootNodeId — from ever reaching a courtroom.
  */
 export type CaseStatusResponse =
-    { id: string; status: "PENDING" | "FAILED" } | ({ status: "READY" } & PublicCase);
+    // `truth?: never` on this arm too, for the same reason it is on PublicCase:
+    // without it, a future `return { id, status, ...entity.bible }` on the
+    // not-yet-ready path typechecks and ships the answer on every poll.
+    | { id: string; status: "PENDING" | "FAILED"; truth?: never }
+    | ({ status: "READY" } & PublicCase);
 
 export interface GameState {
     doubt: number;

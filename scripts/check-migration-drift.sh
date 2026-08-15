@@ -24,6 +24,8 @@ set -euo pipefail
 ROOT_DIR="$(pwd)"
 SCHEMA_DUMP="${ROOT_DIR}/schema.sql"
 MIGRATIONS_DUMP="${ROOT_DIR}/migrations_data.sql"
+# Absolute for the same reason: the trap fires after the cd into packages/api.
+DRIFT_PROBE="${ROOT_DIR}/packages/api/src/database_bundle/migrations/9999999999999-DriftCheck.ts"
 
 API_DIR="packages/api"
 DIST_DATA_SOURCE="./dist/database_bundle/util/data_source.js"
@@ -37,6 +39,10 @@ LOCAL_PORT=5433
 cleanup() {
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     rm -f "$SCHEMA_DUMP" "$MIGRATIONS_DUMP"
+    # The probe migration too. Interrupting the script after generation left it
+    # in the migrations directory, where it sorts last, compiles into dist, and
+    # gets executed against production by the migration glob on next boot.
+    rm -f "$DRIFT_PROBE"
 }
 trap cleanup EXIT
 
@@ -125,7 +131,7 @@ if [ "$GENERATE_EXIT" -ne 0 ]; then
     exit 1
 fi
 
-DRIFT_FILE="${GENERATED}.ts"
+DRIFT_FILE="$DRIFT_PROBE"
 if [ ! -f "$DRIFT_FILE" ]; then
     echo "ERROR: generation reported success but produced no file"
     exit 1

@@ -1,7 +1,7 @@
 import type { Schema } from "@google/genai";
 import type { CaseBible, Evidence } from "@paw-order/shared";
-import { IMAGE_MODEL, TEXT_MODEL, generateImage, generateJson } from "@/ai/gemini";
-import type { GeneratedImage } from "@/ai/gemini";
+import { IMAGE_MODEL, TEXT_MODEL, encodeImage, generateImage, generateJson } from "@/ai/gemini";
+import type { EncodedImage, GeneratedImage } from "@/ai/gemini";
 import { resolveAppEnv } from "@/config/env";
 import { fixtureBible } from "@/cases_bundle/services/case_fixture";
 import {
@@ -49,7 +49,7 @@ async function generateValidated<T>(
     prompt: string,
     schema: Schema,
     validate: (value: unknown) => ValidationResult<T>,
-    options: { reference?: GeneratedImage; signal?: AbortSignal },
+    options: { reference?: EncodedImage; signal?: AbortSignal },
 ): Promise<T> {
     let feedback = "";
     let lastErrors: string[] = [];
@@ -120,19 +120,19 @@ function parseJson(text: string): unknown {
 
 /**
  * Renders every exhibit concurrently, so the wall clock is one image rather than
- * four. allSettled, not all: one refused or malformed image leaves that exhibit
- * pictureless (Evidence.imageUrl is nullable for exactly this) and the trial
- * still plays. Losing a whole generated case to one flaky call is worse.
+ * one per exhibit. allSettled, not all: a refused or malformed image leaves that
+ * exhibit pictureless (Evidence.imageUrl is nullable for exactly this) and the
+ * trial still plays. Losing a whole generated case to one flaky call is worse.
  */
 async function renderEvidence(
     evidence: Evidence[],
-    photo: GeneratedImage,
+    photo: EncodedImage,
     signal: AbortSignal,
 ): Promise<{ evidence: Evidence[]; storedKeys: string[] }> {
     const results = await Promise.allSettled(
         evidence.map(async (exhibit) => {
             const image = await generateImage(exhibit.imagePrompt, photo, signal);
-            return uploadImage(image.bytes, image.mimeType, "evidence");
+            return uploadImage(image.bytes, image.mimeType, "evidence", signal);
         }),
     );
 
@@ -152,7 +152,7 @@ async function renderEvidence(
         return { ...exhibit, imageUrl: result.value.url };
     });
 
-    // One pictureless exhibit is a survivable trial. Four is not a case at all -
+    // One pictureless exhibit is a survivable trial. All of them is not a case -
     // it means the image model is down, out of quota, or refused the whole batch,
     // and every visual claim the trial makes would point at nothing. Better a
     // FAILED the player can retry than a READY case with no evidence in it.
@@ -187,15 +187,18 @@ export async function generateCaseBible(
         return { bible: fixtureBible(photoUrl), storedKeys: [] };
     }
 
+    // Encoded once and shared by all five calls, rather than per call.
+    const reference = encodeImage(photo);
+
     const facts = await generateValidated(
         "case facts",
         factsPrompt(),
         FACTS_SCHEMA,
         validateFacts,
-        { reference: photo, signal },
+        { reference, signal },
     );
 
-    const { evidence, storedKeys } = await renderEvidence(facts.evidence, photo, signal);
+    const { evidence, storedKeys } = await renderEvidence(facts.evidence, reference, signal);
 
     // From here on this run owns paid objects, so the caller needs the keys even
     // when the tree stage throws.

@@ -9,6 +9,8 @@ import {
     resolveAppEnv,
 } from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
+import { CaseEntity } from "@/cases_bundle/models/case_entity";
+import { generationSlotsInUse } from "@/cases_bundle/services/case_service";
 
 // Smallest valid PNG (1x1, transparent).
 const PNG_1X1 = Buffer.from(
@@ -79,8 +81,54 @@ describe("api wiring", () => {
         expect(fetched.body.truth).toBeUndefined();
         expect(fetched.body.nodes.length).toBeGreaterThan(0);
         expect(fetched.body.rootNodeId).toBeTruthy();
+        expect(fetched.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
         // Tests must never write to the real bucket, whatever packages/api/.env holds.
         expect(fetched.body.defendant.photoUrl).toContain("data:image/png");
+    });
+
+    // Two truth-derived fields that are NOT called `truth`. `reliable` names the
+    // witness who is lying, which gamedesign.md section 8 lists as one of the
+    // hidden truths; `imagePrompt` is prose from the same model call that wrote
+    // the truth. Both shipped before this anchor existed.
+    it("strips every truth-derived field from a READY case, not just truth", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+
+        const ready = await pollUntilReady(created.body.id);
+        expect(ready.body.witnesses.length).toBeGreaterThan(0);
+        for (const witness of ready.body.witnesses) {
+            expect(witness.claim).toBeTruthy();
+            expect(witness.reliable).toBeUndefined();
+        }
+        expect(ready.body.evidence.length).toBeGreaterThan(0);
+        for (const exhibit of ready.body.evidence) {
+            expect(exhibit.visualFacts.length).toBeGreaterThan(0);
+            expect(exhibit.imagePrompt).toBeUndefined();
+        }
+    });
+
+    // The FAILED arm had no anchor at all, so a regression that served the bible
+    // on failure would have shipped silently.
+    it("serves no case body when generation failed", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+        await pollUntilReady(created.body.id);
+
+        // Drive the row to FAILED directly: the test generator always succeeds,
+        // so this status is otherwise unreachable from the suite.
+        await AppDataSource.getRepository(CaseEntity).update(created.body.id, { status: "FAILED" });
+
+        const failed = await request(app).get(`/api/cases/${created.body.id}`);
+        expect(failed.status).toBe(200);
+        expect(failed.body.status).toBe("FAILED");
+        expect(failed.body.truth).toBeUndefined();
+        expect(failed.body.nodes).toBeUndefined();
+        expect(failed.body.evidence).toBeUndefined();
+        expect(failed.body.witnesses).toBeUndefined();
+        expect(failed.body.defendant).toBeUndefined();
+        expect(failed.headers["cache-control"]).toBe("no-store");
     });
 
     // A PENDING row still holds the placeholder bible. Serving it would put an
@@ -115,6 +163,34 @@ describe("api wiring", () => {
     it("404s a malformed case id instead of erroring", async () => {
         const response = await request(app).get("/api/cases/not-a-uuid");
         expect(response.status).toBe(404);
+    });
+});
+
+// The slot counter is what bounds concurrent model spend, and a leak is
+// invisible over HTTP until the api starts 503ing everything. Asserting it
+// returns to zero is the cheapest anchor that fails if a release path is lost.
+describe("generation slot accounting", () => {
+    it("releases the slot once generation settles", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+        await pollUntilReady(created.body.id);
+
+        // The release happens in runGeneration's finally, which runs after the
+        // status update the poll observed.
+        for (let attempt = 0; attempt < 50 && generationSlotsInUse() > 0; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(generationSlotsInUse()).toBe(0);
+    });
+
+    it("rejects a request with no photo before charging the daily budget", async () => {
+        // The 400 must come from requirePhoto, which sits BEFORE the budget
+        // middleware. If the order is ever reversed, photoless requests start
+        // spending the day's generation quota and this test still passes - so
+        // the ordering comment in router.ts carries the rest of the weight.
+        const response = await request(app).post("/api/cases");
+        expect(response.status).toBe(400);
     });
 });
 

@@ -30,9 +30,16 @@ export function fixtureFacts(): GeneratedFacts {
             {
                 id: "E1",
                 label: "The defendant beside the ruined cake",
-                imagePrompt: "The dog from the reference photo sitting beside a collapsed cake.",
+                imagePrompt:
+                    "The dog from the reference photo sitting beside a collapsed cake, with two sets of pawprints of different sizes crossing the tiles.",
                 imageUrl: null,
-                visualFacts: ["a collapsed chocolate cake on the kitchen floor"],
+                // Two facts on one exhibit: the scene and the pawprints that
+                // contradict the "only one animal" line. Kept together because
+                // EVIDENCE_COUNT is 3 and both are visible in the same shot.
+                visualFacts: [
+                    "a collapsed chocolate cake on the kitchen floor",
+                    "two sets of pawprints of different sizes",
+                ],
             },
             {
                 id: "E2",
@@ -47,13 +54,6 @@ export function fixtureFacts(): GeneratedFacts {
                 imagePrompt: "A wall clock in a kitchen, hands clearly readable.",
                 imageUrl: null,
                 visualFacts: ["a wall clock reading 14:22"],
-            },
-            {
-                id: "E4",
-                label: "Pawprints across the tiles",
-                imagePrompt: "Frosting pawprints crossing pale kitchen tiles.",
-                imageUrl: null,
-                visualFacts: ["two sets of pawprints of different sizes"],
             },
         ],
         witnesses: [
@@ -105,7 +105,7 @@ export function fixtureTree(): GeneratedTree {
                 id: "N2",
                 speaker: "PROSECUTOR",
                 statement: "Then explain the two sets of pawprints of different sizes.",
-                evidenceIds: ["E4"],
+                evidenceIds: ["E1"],
                 choices: [
                     {
                         text: "Two sets. So my client was not alone.",
@@ -113,7 +113,7 @@ export function fixtureTree(): GeneratedTree {
                             doubt: 15,
                             credibility: 5,
                             suspicion: -5,
-                            revealsEvidenceIds: ["E4"],
+                            revealsEvidenceIds: ["E1"],
                         },
                         nextNodeId: "N4",
                     },
@@ -156,7 +156,7 @@ export function fixtureTree(): GeneratedTree {
                 id: "N4",
                 speaker: "WITNESS",
                 statement: "I saw only the one dog. I am quite certain.",
-                evidenceIds: ["E4"],
+                evidenceIds: ["E1"],
                 choices: [
                     {
                         text: "You could not see the whole kitchen from the hallway.",

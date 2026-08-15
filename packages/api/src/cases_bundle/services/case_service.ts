@@ -28,6 +28,20 @@ export class GenerationBusyError extends Error {
     }
 }
 
+/**
+ * Lets the router reject a busy request before multer buffers 8MB and before
+ * the daily budget is charged. createCase still re-checks: this is an early
+ * out, not the guard - two requests can pass it and only one gets the slot.
+ */
+export function generationSlotsAvailable(): boolean {
+    return inFlight < MAX_CONCURRENT;
+}
+
+/** Test seam for the slot accounting, which no HTTP test can observe directly. */
+export function generationSlotsInUse(): number {
+    return inFlight;
+}
+
 function repository() {
     return AppDataSource.getRepository(CaseEntity);
 }
@@ -57,7 +71,7 @@ function placeholderBible(photoUrl: string): CaseBible {
 
 /**
  * Stores the photo, inserts a PENDING row, and returns its id immediately. The
- * bible plus four image calls takes far longer than any edge will hold a
+ * bible plus its exhibit images takes far longer than any edge will hold a
  * request open, so generation continues in the background and the client polls
  * findCaseStatus.
  */
@@ -174,6 +188,16 @@ export async function findCaseStatus(id: string): Promise<CaseStatusResponse | n
         return { id: entity.id, status: entity.status };
     }
 
-    const { truth: _truth, ...rest } = entity.bible;
-    return { status: "READY", id: entity.id, ...rest };
+    // Two things come off the bible here, not one. `truth` is the obvious
+    // secret; `witnesses[].reliable` is the quiet one - it names which testimony
+    // is false, which is the same answer by another route. imagePrompt goes too:
+    // nothing renders it and it is a paragraph of model prose per exhibit.
+    const { truth: _truth, witnesses, evidence, ...rest } = entity.bible;
+    return {
+        status: "READY",
+        id: entity.id,
+        ...rest,
+        evidence: evidence.map(({ imagePrompt: _prompt, ...exhibit }) => exhibit),
+        witnesses: witnesses.map(({ reliable: _reliable, ...witness }) => witness),
+    };
 }

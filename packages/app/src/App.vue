@@ -33,6 +33,10 @@ async function onFileChange(event: Event): Promise<void> {
         return;
     }
     const file = input.files?.[0];
+    // Cleared immediately: without this, re-picking the SAME photo fires no
+    // change event, so the obvious response to "try another photo" - try the
+    // same one again, since the failure is usually transient - does nothing.
+    input.value = "";
     if (!file) {
         return;
     }
@@ -121,11 +125,20 @@ async function onFileChange(event: Event): Promise<void> {
                     :src="exhibit.imageUrl"
                     :alt="exhibit.label"
                     width="240"
+                    loading="lazy"
                 />
                 <figcaption>
                     {{ exhibit.id }} — {{ exhibit.label }}
                     <ul>
-                        <li v-for="fact in exhibit.visualFacts" :key="fact">{{ fact }}</li>
+                        <!-- Keyed by position, not by the text: visualFacts is
+                             model output with no uniqueness constraint, and two
+                             identical entries would collide. -->
+                        <li
+                            v-for="(fact, index) in exhibit.visualFacts"
+                            :key="`${exhibit.id}-${index}`"
+                        >
+                            {{ fact }}
+                        </li>
                     </ul>
                 </figcaption>
             </figure>
