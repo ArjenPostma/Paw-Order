@@ -233,6 +233,75 @@ describe("validateTree", () => {
         expect(errorsOf(result)).toContain("speaker");
     });
 
+    it("accepts a case the player cannot win but can still argue", () => {
+        // The fixture's best run reaches 55 doubt against an acquitAtDoubt of
+        // 60, so acquittal is impossible. That is a hard case, not a broken one
+        // (gamedesign.md 8), and the run still crosses the reasonable-doubt
+        // line, so the choices decide something.
+        expect(validateTree(fixtureTree(), evidence).ok).toBe(true);
+    });
+
+    it("rejects a tree whose verdict no run can move off GUILTY", () => {
+        const result = validateTree(
+            brokenTree((tree) => {
+                tree.verdictRules.acquitAtDoubt = 250;
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("same doubt verdict");
+    });
+
+    it("rejects a tree that acquits whatever the player does", () => {
+        const result = validateTree(
+            brokenTree((tree) => {
+                tree.verdictRules.acquitAtDoubt = 1;
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("same doubt verdict");
+    });
+
+    it("does not blame verdictRules for a graph that is already broken", () => {
+        // Both of the root's choices dangle, so the reachable span collapses to
+        // 5-10 and the variance check would fire on top of the real errors. The
+        // whole error list is fed back as retry instructions, so a phantom
+        // "fix your thresholds" line spends the one remaining attempt on a
+        // repair that was never needed.
+        const result = validateTree(
+            brokenTree((tree) => {
+                const root = tree.nodes[0];
+                expect(root).toBeDefined();
+                for (const choice of root?.choices ?? []) {
+                    choice.nextNodeId = "N42";
+                }
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("unknown node");
+        // "doubt spans" rather than the headline wording: it appears in the
+        // variance error whatever that sentence is phrased as, so this stays a
+        // real anchor if the message is ever reworded.
+        expect(errorsOf(result)).not.toContain("doubt spans");
+    });
+
+    it("does not walk a cyclic tree forever while collecting its errors", () => {
+        const result = validateTree(
+            brokenTree((tree) => {
+                const choice = tree.nodes[5]?.choices[0];
+                expect(choice).toBeDefined();
+                if (choice) {
+                    choice.nextNodeId = "N1";
+                }
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("cycle");
+    });
+
     it("clamps an effect magnitude instead of rejecting the tree", () => {
         const result = validateTree(
             brokenTree((tree) => {
