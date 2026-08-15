@@ -2,9 +2,11 @@ import type { Schema } from "@google/genai";
 import type { CaseBible, Evidence } from "@paw-order/shared";
 import { IMAGE_MODEL, TEXT_MODEL, encodeImage, generateImage, generateJson } from "@/ai/gemini";
 import type { EncodedImage, GeneratedImage } from "@/ai/gemini";
-import { resolveAppEnv } from "@/config/env";
+import { positiveIntEnv, resolveAppEnv } from "@/config/env";
 import { fixtureBible } from "@/cases_bundle/services/case_fixture";
 import {
+    DOG_CHECK_PROMPT,
+    DOG_SCHEMA,
     FACTS_SCHEMA,
     TREE_SCHEMA,
     factsPrompt,
@@ -168,6 +170,90 @@ async function renderEvidence(
     }
 
     return { evidence: rendered, storedKeys };
+}
+
+/**
+ * How long the upload request will wait on the dog check. It runs inside the
+ * POST, so this is a bound on the player's wait, not on a background job -
+ * short on purpose, and short enough that the fall-open below is reached long
+ * before any edge gives up on the request.
+ */
+const DOG_CHECK_TIMEOUT_MS = positiveIntEnv("DOG_CHECK_TIMEOUT_MS", 8_000);
+
+/**
+ * Concurrent dog checks.
+ *
+ * Each one holds the uploaded photo (up to 8MB) and the base64 copy encodeImage
+ * makes of it (~10.7MB) alive for as long as the call takes, and it runs before
+ * createCase, so the generation slot counter never sees it and never bounds it.
+ * Uncapped, that was ~19MB per in-flight upload with only a per-minute per-ip
+ * limiter deciding how many could overlap.
+ */
+const MAX_CONCURRENT_DOG_CHECKS = positiveIntEnv("DOG_CHECK_MAX_CONCURRENT", 4);
+
+let dogChecksInFlight = 0;
+
+/** Thrown when every dog-check slot is busy. The router answers 503. */
+export class DogCheckBusyError extends Error {
+    constructor() {
+        super("All dog check slots are busy.");
+    }
+}
+
+/** The one field DOG_SCHEMA asks for, narrowed off an untrusted response. */
+export function saysDog(value: unknown): boolean {
+    return typeof value === "object" && value !== null && "isDog" in value && value.isDog === true;
+}
+
+/**
+ * Whether the photo has a dog in it, asked before anything is paid for.
+ *
+ * One cheap text call against the same photo the exhibits would be rendered
+ * from. It is the only guard between an anonymous upload and four paid calls,
+ * and the router mounts it ahead of both daily ceilings so a rejected photo
+ * spends neither.
+ *
+ * Fails OPEN. A model outage here would otherwise turn every upload away at the
+ * door, and it costs nothing to let one through: if Gemini is down, the facts
+ * stage is the next thing to run and it fails before an image is ever rendered.
+ */
+export async function looksLikeDog(photo: GeneratedImage): Promise<boolean> {
+    if (resolveAppEnv() === "test") {
+        // The suite must never reach Gemini. Same guard shape as r2.ts.
+        return true;
+    }
+
+    if (dogChecksInFlight >= MAX_CONCURRENT_DOG_CHECKS) {
+        throw new DogCheckBusyError();
+    }
+    dogChecksInFlight += 1;
+
+    try {
+        const text = await generateJson(DOG_CHECK_PROMPT, DOG_SCHEMA, {
+            reference: encodeImage(photo),
+            signal: AbortSignal.timeout(DOG_CHECK_TIMEOUT_MS),
+        });
+        const parsed = parseJson(text);
+        if (parsed === null) {
+            // A 200 whose body is not JSON is the same class of non-answer as a
+            // thrown error, and must fall the same way. Read as a plain false it
+            // would tell a player holding a real dog that it is not a dog, which
+            // is the one outcome DOG_CHECK_PROMPT is written to avoid.
+            console.warn(
+                `[paw-order-api] dog check answered with ${String(text.length)} chars of non-JSON, letting the upload through`,
+            );
+            return true;
+        }
+        return saysDog(parsed);
+    } catch (error: unknown) {
+        console.error(
+            `[paw-order-api] dog check did not answer (model=${TEXT_MODEL}), letting the upload through`,
+            error,
+        );
+        return true;
+    } finally {
+        dogChecksInFlight -= 1;
+    }
 }
 
 /**

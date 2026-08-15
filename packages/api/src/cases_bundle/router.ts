@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Router } from "express";
 import type { RequestHandler } from "express";
 import multer, { MulterError } from "multer";
@@ -6,17 +7,32 @@ import {
     GenerationBusyError,
     createCase,
     findCaseStatus,
+    findReusableCase,
     generationSlotsAvailable,
 } from "@/cases_bundle/services/case_service";
+import { DogCheckBusyError, looksLikeDog } from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
 import { playTurn } from "@/cases_bundle/services/trial_service";
 import { dailyBudget, rateLimit } from "@/http/rate_limit";
 
+// Declaration merging rather than a cast onto the request: reuseExistingCase
+// already hashed the photo and the route handler needs that digest to store on
+// the row, and hashing 8MB a second time to avoid one interface is the wrong
+// saving.
+declare module "express-serve-static-core" {
+    interface Request {
+        /** Set by reuseExistingCase when the photo turned out to be new. */
+        photoHash?: string;
+    }
+}
+
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+const DAY_MS = 24 * 60 * 60 * 1000;
 /** Long enough for any dog's name, short enough that it cannot be a paragraph. */
 const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
+const NOT_A_DOG = "This court only tries dogs. Try a photo of one.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // C0, DEL and C1, plus the invisible formatting characters. The formatting ones
 // are not control characters and not \s, so without them here a name of 32 zero
@@ -67,14 +83,85 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
 };
 
 // Generation is anonymous and writes to paid storage, so it is capped per ip and
-// per day. Both ceilings are env-tunable so a load test (or the suite) can raise
-// them without editing code.
-const perIpLimiter = rateLimit({
+// per day. Every ceiling is env-tunable so a load test (or the suite) can raise
+// it without editing code.
+
+/**
+ * The outer per-ip bound, and the only one mounted before the body is read. It
+ * is deliberately loose: what it exists to cap is the work done on the way to
+ * deciding whether to generate at all - buffering up to 8MB of multipart, and
+ * the dog check's model call - not generation itself, which the tighter limiter
+ * below owns.
+ *
+ * Loose enough that no honest player meets it. Someone picking the wrong photo
+ * two or three times in a row is the normal case this exists to let through.
+ */
+const perIpUploadLimiter = rateLimit({
+    windowMs: 60_000,
+    max: positiveIntEnv("UPLOAD_MAX_PER_MINUTE", 10),
+});
+/**
+ * The real per-ip ceiling on generation, mounted past every check that can turn
+ * a request away without generating anything.
+ *
+ * Split out of perIpUploadLimiter for the same reason dailyBudget was split out
+ * of rateLimit: charged at the door, it was spent on requests that generated
+ * nothing. A photo with no dog in it, or one whose case already exists, would
+ * take the player's minute and answer the next upload - the one that was going
+ * to work - with 429, having produced no case for it.
+ */
+const perIpGenerationLimiter = rateLimit({
     windowMs: 60_000,
     max: positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
+    refundOnRejection: true,
+});
+/**
+ * The second ceiling on the same ip, over a 24h window rather than a minute.
+ * The per-minute limiter stops a burst; this is what stops one caller walking
+ * steadily through the whole day's budget at one case a minute.
+ *
+ * Only new cases are capped. Replaying costs no generation and does not come
+ * through this route at all, so a player who has spent both still has every
+ * case they have ever played.
+ *
+ * ponytail: shares rate_limit.ts's in-process state, so it resets on deploy -
+ * and its MAX_TRACKED_IPS backstop clears the whole map wholesale, which over a
+ * 24h window means 10k distinct ips resets everyone's daily allowance. The
+ * global budget below is the ceiling that still holds in that case.
+ */
+const perIpDailyLimiter = rateLimit({
+    windowMs: DAY_MS,
+    max: positiveIntEnv("GENERATION_MAX_PER_IP_PER_DAY", 2),
+    // The default 429 body says "shortly", which is a lie about a 24h window.
+    message: "That is both of today's cases. A new one can be opened tomorrow.",
+    // Buckets only leave the map when their window expires, so over a day this
+    // one accumulates every caller rather than every recent caller. At the
+    // default 10k the backstop would clear wholesale on an ordinary traffic day
+    // and hand everyone a fresh allowance.
+    maxTrackedIps: 200_000,
+    refundOnRejection: true,
+});
+/**
+ * The global ceiling on the dog check specifically.
+ *
+ * The check is a paid model call sitting in front of every generation ceiling,
+ * which is the point - a photo with no dog in it must not cost the player a
+ * case. But that also puts it outside globalDailyBudget, and without a ceiling
+ * of its own it was the one thing in the app that could spend money with no
+ * 24h bound at all: 10 uploads a minute is 14,400 billed calls a day from one
+ * address, and rotating addresses multiplied it linearly.
+ *
+ * Set well above the generation budget, because rejecting non-dogs is the
+ * cheap outcome and should not be the scarce one.
+ */
+const dogCheckBudget = dailyBudget({
+    dailyMax: positiveIntEnv("DOG_CHECK_MAX_PER_DAY", 200),
+    message: "The court has closed its doors for today. Try again tomorrow.",
+    // Deliberately NOT refunded: the 400 this guards IS the spend it bounds.
 });
 const globalDailyBudget = dailyBudget({
     dailyMax: positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
+    refundOnRejection: true,
 });
 
 /**
@@ -131,19 +218,128 @@ const requirePhoto: RequestHandler = (req, res, next) => {
     next();
 };
 
+/**
+ * Hands back the case already generated for these exact bytes under this exact
+ * name, rather than paying for a second one.
+ *
+ * Mounted ahead of the dog check and both daily ceilings on purpose: a reuse
+ * generates nothing, so it must not spend a model call or a slot from either.
+ * That also means re-uploading a photo you have already played never costs you
+ * one of your two cases for the day.
+ *
+ * The name goes into the digest because the prompts write it through the whole
+ * bible, so the same dog under a new name is a different case rather than a
+ * relabelled one. sanitiseName runs first for the same reason the route uses it:
+ * two names that reach the generator identically must hash identically.
+ */
+const reuseExistingCase: RequestHandler = async (req, res, next) => {
+    const file = req.file;
+    if (!file) {
+        next();
+        return;
+    }
+
+    // The NUL separator is what stops ("ab", "c") and ("a", "bc") colliding.
+    // sanitiseName has already stripped control characters, so no name can
+    // contain one.
+    const photoHash = createHash("sha256")
+        .update(file.buffer)
+        .update("\0")
+        .update(sanitiseName(req.body))
+        .digest("hex");
+
+    const existing = await findReusableCase(photoHash);
+    if (existing) {
+        // 200, not 202: nothing was accepted for generation. The client polls
+        // on either, so a PENDING hit joins the run already going.
+        //
+        // Not a guarantee against double-submits: this read and the insert that
+        // follows are not atomic and the index is deliberately non-unique, so
+        // two requests that overlap can both miss and both generate. What
+        // actually serialises them is perIpGenerationLimiter at one a minute.
+        res.status(200).json(existing);
+        return;
+    }
+
+    req.photoHash = photoHash;
+    next();
+};
+
+/**
+ * Turns away a photo with no dog in it before anything is paid for.
+ *
+ * Ahead of both daily ceilings, so a rejected photo spends neither. Behind
+ * reuseExistingCase, so a photo already tried in this court is never asked
+ * about twice.
+ *
+ * Its own cost is bounded by the per-minute limiter above and nothing else -
+ * one text call per upload attempt, against ~$0.11 for the generation it stands
+ * in front of.
+ */
+const requireDog: RequestHandler = async (req, res, next) => {
+    const file = req.file;
+    if (!file) {
+        next();
+        return;
+    }
+
+    let isDog: boolean;
+    try {
+        isDog = await looksLikeDog({ bytes: file.buffer, mimeType: file.mimetype });
+    } catch (error: unknown) {
+        // Every check holds the photo and its base64 copy alive while it runs,
+        // so the slots are a memory bound, not a cost one. Shedding here is the
+        // right answer: the alternative is queueing 8MB buffers behind it.
+        if (error instanceof DogCheckBusyError) {
+            res.setHeader("Retry-After", "60");
+            res.status(503).json({ error: "The court is full. Try again in a minute." });
+            return;
+        }
+        throw error;
+    }
+
+    if (isDog) {
+        next();
+        return;
+    }
+    res.status(400).json({ error: NOT_A_DOG });
+};
+
 export const casesRouter = Router();
 
-// Order is load-bearing, cheapest rejection first. The daily budget comes LAST
-// because it is the ceiling that actually bounds the model bill: charging it
-// before the body was parsed meant 50 photoless POSTs could burn the entire
-// day's quota and lock out every real player for 24 hours at zero cost to the
-// caller. A slot is now only ever spent on a request that is about to generate.
+// Order is load-bearing, cheapest rejection first, and every ceiling that
+// bounds generation sits behind every check that can turn the request away
+// without generating anything. A slot - per minute, per day, or global - is
+// only ever spent on a request that is about to produce a case.
+//
+// Both times that rule was broken it cost the player rather than the attacker.
+// The daily budget, charged before the body was parsed, let 50 photoless POSTs
+// burn the whole day's quota and lock out every real player for 24 hours at no
+// cost to the caller. The per-minute limiter, charged at the door, took the
+// player's minute for a photo with no dog in it or one whose case already
+// existed, and then answered the upload that WOULD have worked with a 429.
+//
+// perIpUploadLimiter and dogCheckBudget are the exceptions, and only because
+// they guard the work that happens before that decision can be made: the
+// multipart buffer and the dog check's model call. Neither is refunded on a
+// rejection - the rejected request is exactly what they exist to bound - and
+// every ceiling behind them is, so being told no never costs a case.
+//
+// rejectWhenBusy sits behind reuseExistingCase rather than in front of it: a
+// reuse generates nothing and needs no slot, so answering it with "the court is
+// full" turned a free hit into a failure. The cost is that the multipart body is
+// buffered before the 503, which perIpUploadLimiter bounds.
 casesRouter.post(
     "/",
-    perIpLimiter,
-    rejectWhenBusy,
+    perIpUploadLimiter,
     uploadPhoto,
     requirePhoto,
+    reuseExistingCase,
+    rejectWhenBusy,
+    dogCheckBudget,
+    requireDog,
+    perIpGenerationLimiter,
+    perIpDailyLimiter,
     globalDailyBudget,
     async (req, res) => {
         const file = req.file;
@@ -160,6 +356,10 @@ casesRouter.post(
                 // multer parses text fields onto req.body; anything else in
                 // there is ignored, and an absent name is the default.
                 sanitiseName(req.body),
+                // Set by reuseExistingCase, which cannot have been skipped: a
+                // request without a file never gets past requirePhoto. Stored
+                // so the NEXT identical upload finds this case.
+                req.photoHash ?? null,
             );
             res.status(202).json(accepted);
         } catch (error: unknown) {

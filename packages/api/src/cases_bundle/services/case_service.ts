@@ -1,3 +1,4 @@
+import { MoreThan } from "typeorm";
 import type { CaseAccepted, CaseBible, CaseStatusResponse } from "@paw-order/shared";
 import { publicEvidence, publicNode, publicWitness } from "@paw-order/shared";
 import type { GeneratedImage } from "@/ai/gemini";
@@ -88,6 +89,7 @@ function placeholderBible(photoUrl: string): CaseBible {
 export async function createCase(
     photo: GeneratedImage,
     defendantName: string,
+    photoHash: string | null,
 ): Promise<CaseAccepted> {
     if (inFlight >= MAX_CONCURRENT) {
         throw new GenerationBusyError();
@@ -95,7 +97,7 @@ export async function createCase(
     inFlight += 1;
 
     try {
-        const pending = await insertPendingCase(photo);
+        const pending = await insertPendingCase(photo, photoHash);
         // Deliberately not awaited: the response goes out now. runGeneration owns
         // the slot from here and never rejects.
         void runGeneration(pending.id, pending.photoUrl, photo, defendantName);
@@ -107,11 +109,51 @@ export async function createCase(
     }
 }
 
-async function insertPendingCase(photo: GeneratedImage): Promise<{ id: string; photoUrl: string }> {
+/**
+ * The case an identical submission should be handed back instead of generating
+ * a new one.
+ *
+ * PENDING counts as reusable, not just READY: a double-submit should join the
+ * generation already running for those exact bytes rather than start a second
+ * one. FAILED deliberately does not - re-uploading a photo whose case fell apart
+ * is the player retrying, and they must get a real attempt.
+ */
+export async function findReusableCase(photoHash: string): Promise<CaseAccepted | null> {
+    const entity = await repository().findOne({
+        where: [
+            { photoHash, status: "READY" },
+            // Only a generation that could still be alive. runGeneration is
+            // fire-and-forget in this process, so a deploy or crash mid-run
+            // strands the row PENDING with nobody left to fail it - and an
+            // unbounded match here handed that corpse back to every future
+            // upload of the same photo, forever. The player's natural retry
+            // (same file, same name) was the one thing that could never
+            // recover. Past the deadline the row falls through and generates.
+            {
+                photoHash,
+                status: "PENDING",
+                createdAt: MoreThan(new Date(Date.now() - TIMEOUT_MS)),
+            },
+        ],
+        // Newest wins. Two rows can share a hash: a PENDING one that later
+        // failed leaves the row FAILED and the retry inserts another.
+        order: { createdAt: "DESC" },
+    });
+    return entity ? { id: entity.id, status: entity.status } : null;
+}
+
+async function insertPendingCase(
+    photo: GeneratedImage,
+    photoHash: string | null,
+): Promise<{ id: string; photoUrl: string }> {
     const stored = await uploadImage(photo.bytes, photo.mimeType, "dogs");
     try {
         const saved = await repository().save(
-            repository().create({ status: "PENDING", bible: placeholderBible(stored.url) }),
+            repository().create({
+                status: "PENDING",
+                bible: placeholderBible(stored.url),
+                photoHash,
+            }),
         );
         return { id: saved.id, photoUrl: stored.url };
     } catch (error: unknown) {
