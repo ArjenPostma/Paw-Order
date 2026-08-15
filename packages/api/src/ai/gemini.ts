@@ -152,7 +152,11 @@ export async function generateImage(
         contents: userContent(prompt, reference),
         config: {
             responseModalities: ["IMAGE"],
-            imageConfig: { imageSize: IMAGE_SIZE },
+            // Square because every surface that renders an exhibit is square or
+            // near it - the mugshot is a 224px square and the strip tiles are
+            // fixed-width - so a landscape frame is cropped or letterboxed at
+            // every size the player ever sees it.
+            imageConfig: { imageSize: IMAGE_SIZE, aspectRatio: "1:1" },
             abortSignal: signal,
         },
     });

@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import type { PlayedCase } from "@/history";
 
-defineProps<{ error: string | null }>();
-const emit = defineEmits<{ photo: [file: File] }>();
+// `previous` is a prop, not a localStorage read of this screen's own: dropping a
+// dead case has to update the strip, and remounting this component to re-read it
+// would throw away whatever the player had typed into the name field.
+defineProps<{ error: string | null; previous: PlayedCase[] }>();
+const emit = defineEmits<{ photo: [file: File, name: string]; replay: [id: string] }>();
+
+// Matches MAX_NAME_LENGTH in the api's router, which cuts it again anyway.
+const MAX_NAME_LENGTH = 32;
+
+const name = ref("");
 
 // Mirrors what the api accepts. The api re-checks both and stays the authority;
 // this exists because a rejected upload still costs the caller their one
@@ -33,7 +42,7 @@ function take(file: File | undefined): void {
         return;
     }
     rejected.value = null;
-    emit("photo", file);
+    emit("photo", file, name.value.trim());
 }
 
 function onFileChange(event: Event): void {
@@ -81,6 +90,19 @@ function onDrop(event: DragEvent): void {
         </h1>
         <p class="upload__promise">Justice for every good boy.</p>
 
+        <!-- Outside the envelope's label on purpose: that label IS the file
+             input, so a text field inside it opens the file picker on click. -->
+        <label class="named">
+            <span class="field-label">Defendant's name</span>
+            <input
+                v-model="name"
+                class="named__input"
+                type="text"
+                :maxlength="MAX_NAME_LENGTH"
+                autocomplete="off"
+            />
+        </label>
+
         <!-- The label IS the drop zone: one target for click, keyboard and
              drag, so there is no second control to keep in sync. -->
         <label
@@ -101,6 +123,32 @@ function onDrop(event: DragEvent): void {
         <p v-if="rejected || error" class="upload__error" role="alert">
             {{ rejected ?? error }}
         </p>
+
+        <!-- Replaying costs no generation, so the way back to a case already
+             paid for belongs on the same screen as the way to a new one. -->
+        <section v-if="previous.length > 0" class="prior">
+            <h2 class="field-label">Cases on file</h2>
+            <ul class="prior__strip">
+                <li v-for="played in previous" :key="played.id">
+                    <button class="prior__case" type="button" @click="$emit('replay', played.id)">
+                        <!-- Absent when the api inlined the photo as a data URL:
+                             see rememberCase. The placard stands in for it. -->
+                        <img
+                            v-if="played.photoUrl"
+                            class="prior__photo"
+                            :src="played.photoUrl"
+                            alt=""
+                            loading="lazy"
+                        />
+                        <span v-else class="prior__photo prior__photo--none" aria-hidden="true">
+                            {{ played.name.slice(0, 1) }}
+                        </span>
+                        <span class="prior__name">{{ played.name }}</span>
+                        <span class="prior__charge">{{ played.charge }}</span>
+                    </button>
+                </li>
+            </ul>
+        </section>
     </main>
 </template>
 
@@ -150,6 +198,31 @@ function onDrop(event: DragEvent): void {
     letter-spacing: 0.06em;
     color: var(--ink-soft);
     margin: 0 0 1.5rem;
+}
+
+/* A line on the docket cover above the envelope, not a form field on a page. */
+.named {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    width: min(30rem, 100%);
+    text-align: left;
+}
+
+.named__input {
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    background: var(--paper-shade);
+    color: var(--ink);
+    border: 1px solid var(--paper-edge);
+    border-bottom: 2px solid var(--ink-soft);
+    font-family: var(--transcript);
+    font-size: 1rem;
+}
+
+.named__input:focus-visible {
+    outline: 3px solid var(--stamp);
+    outline-offset: 2px;
 }
 
 .envelope {
@@ -223,6 +296,80 @@ function onDrop(event: DragEvent): void {
     color: var(--stamp);
     border-left: 3px solid var(--stamp);
     text-align: left;
+}
+
+/* Mugshots clipped to the file, along the bottom of the cover. Scrolls rather
+   than wraps for the same reason the exhibit strip does. */
+.prior {
+    width: min(46rem, 100%);
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: var(--rule);
+    text-align: left;
+}
+
+.prior__strip {
+    list-style: none;
+    display: flex;
+    gap: 0.75rem;
+    margin: 0.5rem 0 0;
+    /* overflow-x: auto clips vertically too, so the tile's hover lift would cut
+       its own top border off against the scroll box. The padding is the room it
+       lifts into. */
+    padding: 0.25rem 0;
+    overflow-x: auto;
+}
+
+.prior__case {
+    display: grid;
+    gap: 0.15rem;
+    width: 7rem;
+    padding: 0.35rem;
+    background: var(--paper-shade);
+    color: var(--ink);
+    border: 1px solid var(--paper-edge);
+    text-align: left;
+    transition:
+        border-color 140ms ease,
+        transform 140ms ease;
+}
+
+.prior__case:hover {
+    border-color: var(--stamp);
+    transform: translateY(-2px);
+}
+
+/* Square, matching what the generator now renders. The uploaded photo is not
+   resized anywhere yet, so this crops a full-size original into a 6rem tile. */
+.prior__photo {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    background: var(--paper-edge);
+}
+
+.prior__photo--none {
+    display: grid;
+    place-items: center;
+    font-family: var(--display);
+    font-size: 2rem;
+    color: var(--ink-soft);
+}
+
+.prior__name {
+    font-family: var(--display);
+    font-size: 0.9375rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    padding-top: 0.2rem;
+}
+
+.prior__charge {
+    font-family: var(--transcript);
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--ink-soft);
 }
 
 @media (max-height: 40rem) {

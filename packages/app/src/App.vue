@@ -7,7 +7,8 @@ import type {
     Truth,
     Verdict,
 } from "@paw-order/shared";
-import { createCase, fetchCase, playTurn } from "@/api";
+import { ApiError, createCase, fetchCase, playTurn } from "@/api";
+import { forgetCase, playedCases, rememberCase } from "@/history";
 import ArrestScreen from "@/screens/ArrestScreen.vue";
 import CourtroomScreen from "@/screens/CourtroomScreen.vue";
 import PreparingScreen from "@/screens/PreparingScreen.vue";
@@ -45,6 +46,66 @@ const turning = ref(false);
 // The arrest screen is a beat, not a state the api knows about: a ready case
 // waits here until the player enters court.
 const entered = ref(false);
+// The "cases on file" strip, held here rather than read by the upload screen, so
+// that dropping a dead case updates the list without remounting the screen and
+// wiping whatever the player had typed into the defendant name field.
+const previous = ref(playedCases());
+
+/** The one place a READY case becomes the case being played. */
+function openCase(ready: PublicCase): void {
+    currentCase.value = ready;
+    entered.value = false;
+    preparing.value = false;
+    rememberCase({
+        id: ready.id,
+        name: ready.defendant.name,
+        title: ready.crime.title,
+        charge: ready.crime.charge,
+        photoUrl: ready.defendant.photoUrl,
+    });
+    previous.value = playedCases();
+}
+
+/**
+ * Replays a case the player already paid a generation for. No poll: the case is
+ * READY or it is gone, and a gone case is dropped from the strip rather than
+ * left there to fail again on the next click.
+ */
+async function onReplay(id: string): Promise<void> {
+    run += 1;
+    const thisRun = run;
+    error.value = null;
+
+    try {
+        const result = await fetchCase(id);
+        if (thisRun !== run) {
+            return;
+        }
+        if (result.status !== "READY") {
+            dropCase(id);
+            return;
+        }
+        openCase(result);
+    } catch (cause) {
+        if (thisRun !== run) {
+            return;
+        }
+        // A 404 means the case is gone for good; anything else may be the
+        // network, so only the miss drops the tile.
+        if (cause instanceof ApiError && cause.status === 404) {
+            dropCase(id);
+            return;
+        }
+        error.value = cause instanceof Error ? cause.message : "That case would not open.";
+    }
+}
+
+/** A case the api will not serve again: off the strip, and say so once. */
+function dropCase(id: string): void {
+    forgetCase(id);
+    previous.value = playedCases();
+    error.value = "That case is no longer on file.";
+}
 
 /** gamedesign.md 14: one screen at a time, in order. */
 const screen = computed(() => {
@@ -136,7 +197,7 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function onPhoto(file: File): Promise<void> {
+async function onPhoto(file: File, name: string): Promise<void> {
     run += 1;
     const thisRun = run;
     preparing.value = true;
@@ -145,7 +206,7 @@ async function onPhoto(file: File): Promise<void> {
     entered.value = false;
 
     try {
-        const accepted = await createCase(file);
+        const accepted = await createCase(file, name);
         let consecutiveFailures = 0;
 
         for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
@@ -169,8 +230,7 @@ async function onPhoto(file: File): Promise<void> {
             consecutiveFailures = 0;
 
             if (result.status === "READY") {
-                currentCase.value = result;
-                preparing.value = false;
+                openCase(result);
                 return;
             }
             if (result.status === "FAILED") {
@@ -189,7 +249,13 @@ async function onPhoto(file: File): Promise<void> {
 </script>
 
 <template>
-    <UploadScreen v-if="screen === 'upload'" :error="error" @photo="onPhoto" />
+    <UploadScreen
+        v-if="screen === 'upload'"
+        :error="error"
+        :previous="previous"
+        @photo="onPhoto"
+        @replay="onReplay"
+    />
 
     <PreparingScreen v-else-if="screen === 'preparing'" />
 
@@ -197,6 +263,7 @@ async function onPhoto(file: File): Promise<void> {
         v-else-if="screen === 'arrest' && currentCase"
         :current-case="currentCase"
         @enter="enterCourt"
+        @leave="takeAnotherCase"
     />
 
     <CourtroomScreen
@@ -205,6 +272,7 @@ async function onPhoto(file: File): Promise<void> {
         :exhibits="exhibits"
         :witnesses="currentCase.witnesses"
         :charge="currentCase.crime.charge"
+        :timeline="currentCase.crime.timeline"
         :defendant-name="currentCase.defendant.name"
         :question="path.length + 1"
         :turning="turning"

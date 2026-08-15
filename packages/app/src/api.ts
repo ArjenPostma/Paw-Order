@@ -16,6 +16,21 @@ export function apiUrl(path: string): string {
  */
 const TURN_TIMEOUT_MS = 15000;
 
+/**
+ * Carries the status alongside the message. A caller that has to tell "this case
+ * is gone for good" from "the network blinked" was otherwise left matching on
+ * the api's own user-facing copy, which quietly stops working when that copy is
+ * reworded.
+ */
+export class ApiError extends Error {
+    constructor(
+        message: string,
+        readonly status: number,
+    ) {
+        super(message);
+    }
+}
+
 async function readJson(response: Response): Promise<unknown> {
     if (!response.ok) {
         // The api sends an actionable message ("max 8MB", "Case not found");
@@ -29,16 +44,25 @@ async function readJson(response: Response): Promise<unknown> {
         // now or give up. Seconds, because the window is a minute.
         const retryAfter = Number(response.headers.get("Retry-After"));
         if (response.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
-            throw new Error(`${text} Another case can be opened in ${String(retryAfter)}s.`);
+            throw new ApiError(
+                `${text} Another case can be opened in ${String(retryAfter)}s.`,
+                response.status,
+            );
         }
-        throw new Error(text);
+        throw new ApiError(text, response.status);
     }
     return response.json();
 }
 
 /** Returns as soon as the case has an id. The case itself is still generating. */
-export async function createCase(photo: File): Promise<CaseAccepted> {
+export async function createCase(photo: File, name: string): Promise<CaseAccepted> {
     const body = new FormData();
+    // Before the photo, which is the order multer's own docs ask for: a field
+    // that arrives after the file is not guaranteed to be on req.body while the
+    // file is being handled. Omitted entirely when blank - the api defaults it.
+    if (name) {
+        body.append("name", name);
+    }
     body.append("photo", photo);
     const response = await fetch(apiUrl("/api/cases"), { method: "POST", body });
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary

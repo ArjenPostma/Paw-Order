@@ -7,6 +7,8 @@ const props = defineProps<{
     exhibits: PublicEvidence[];
     witnesses: PublicWitness[];
     charge: string;
+    /** The prosecution's version of events, as read on the arrest sheet. */
+    timeline: string[];
     defendantName: string;
     /** Which question of the examination this is. Real: the run's own length. */
     question: number;
@@ -129,6 +131,19 @@ onMounted(() => statementRef.value?.focus());
                         <span class="witness__name">{{ witness.name }}</span>
                         {{ witness.claim }}
                     </p>
+
+                    <!-- Same list the arrest sheet showed, kept in reach: the
+                         contradiction a player is hunting is usually between a
+                         witness claim and a clock, and sending them back out of
+                         the courtroom to re-read the hours is not a puzzle. -->
+                    <h2 class="field-label rail__title rail__title--second">
+                        The prosecution's timeline
+                    </h2>
+                    <ol class="rail__timeline">
+                        <!-- Keyed by position, as on the arrest sheet: model
+                             prose with no uniqueness constraint. -->
+                        <li v-for="(entry, index) in timeline" :key="`t${index}`">{{ entry }}</li>
+                    </ol>
                 </aside>
 
                 <!-- Laid out along the bottom of the page the way exhibits are
@@ -388,6 +403,31 @@ onMounted(() => statementRef.value?.focus());
 
 .rail__title {
     margin: 0 0 0.75rem;
+}
+
+/* Separated from the witness list by the same rule that separates sections of
+   the file itself, so the rail reads as two records rather than one long one. */
+.rail__title--second {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: var(--rule);
+}
+
+.rail__timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.25rem;
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--ink-soft);
+}
+
+.rail__timeline li {
+    padding-left: 0.75rem;
+    border-left: 2px solid var(--tape);
 }
 
 .witness {

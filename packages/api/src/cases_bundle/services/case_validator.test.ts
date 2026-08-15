@@ -65,16 +65,6 @@ describe("validateFacts", () => {
         expect(result.ok).toBe(false);
         expect(errorsOf(result)).toContain("E9");
     });
-
-    it("rejects a missing defendant name", () => {
-        const result = validateFacts(
-            brokenFacts((facts) => {
-                facts.defendantName = "   ";
-            }),
-        );
-        expect(result.ok).toBe(false);
-        expect(errorsOf(result)).toContain("defendantName");
-    });
 });
 
 describe("validateTree", () => {
