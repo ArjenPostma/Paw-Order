@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import type { PublicCase } from "@paw-order/shared";
-import { createCase, fetchCase } from "@/api";
+import type { PublicCase, PublicTrialNode, Truth, Verdict } from "@paw-order/shared";
+import { createCase, fetchCase, playTurn } from "@/api";
 
 // Infrastructure shell only, deliberately unstyled: proves upload -> generation
 // -> poll -> client. The real screens (Landing, Case introduction, Courtroom,
@@ -18,6 +18,66 @@ const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 const currentCase = ref<PublicCase | null>(null);
 const error = ref<string | null>(null);
 const status = ref<"idle" | "preparing" | "ready">("idle");
+
+/**
+ * The run. `path` is the whole list of choice indexes taken so far: the api
+ * holds the effects table and replays it every turn, so there is no local score
+ * to keep and nothing here to tamper with. `node` is whichever node that replay
+ * left the player on, and `outcome` is set once the trial ends.
+ */
+const path = ref<number[]>([]);
+const node = ref<PublicTrialNode | null>(null);
+const revealedEvidenceIds = ref<string[]>([]);
+const outcome = ref<{ verdict: Verdict; score: number; truth: Truth } | null>(null);
+// One turn in flight at a time: two clicks would otherwise push two indexes and
+// send a path the player never chose.
+const turning = ref(false);
+
+function startTrial(): void {
+    path.value = [];
+    node.value = currentCase.value?.rootNode ?? null;
+    revealedEvidenceIds.value = [];
+    outcome.value = null;
+}
+
+async function choose(index: number): Promise<void> {
+    const id = currentCase.value?.id;
+    if (!id || turning.value) {
+        return;
+    }
+    // Same guard the poll loop uses: uploading a new photo mid-turn bumps `run`,
+    // and without this the in-flight turn resolves afterwards and writes the
+    // previous case's trial over the new one.
+    const thisRun = run;
+    turning.value = true;
+    error.value = null;
+    // Not pushed onto path until the api accepts it, so a rejected turn leaves
+    // the run where it was instead of desynchronised from the server.
+    const attempted = [...path.value, index];
+    try {
+        const turn = await playTurn(id, attempted);
+        if (thisRun !== run) {
+            return;
+        }
+        path.value = attempted;
+        revealedEvidenceIds.value = turn.revealedEvidenceIds;
+        if (turn.status === "VERDICT") {
+            node.value = null;
+            outcome.value = { verdict: turn.verdict, score: turn.score, truth: turn.truth };
+        } else {
+            node.value = turn.node;
+        }
+    } catch (cause) {
+        if (thisRun !== run) {
+            return;
+        }
+        error.value = cause instanceof Error ? cause.message : "That move did not land.";
+    } finally {
+        // Unconditional: a superseded turn must still release the buttons, or
+        // the new case starts with every choice disabled.
+        turning.value = false;
+    }
+}
 
 // Bumped on every upload so an in-flight poll from a previous photo stops
 // instead of overwriting the new case.
@@ -74,6 +134,7 @@ async function onFileChange(event: Event): Promise<void> {
             if (result.status === "READY") {
                 currentCase.value = result;
                 status.value = "ready";
+                startTrial();
                 return;
             }
             if (result.status === "FAILED") {
@@ -150,23 +211,38 @@ async function onFileChange(event: Event): Promise<void> {
                 </li>
             </ul>
 
-            <h3>Opening statement</h3>
-            <!-- Only the opening node ships now; the rest of the trial arrives
-                 a node at a time from POST /api/cases/:id/turn. -->
-            <p>
-                {{ currentCase.rootNode.speaker }}:
-                {{ currentCase.rootNode.statement }}
-            </p>
-            <ol>
-                <!-- Keyed by position because the index IS the identifier the
-                     api takes back: choices carry no id of their own. -->
-                <li
-                    v-for="(choice, index) in currentCase.rootNode.choices"
-                    :key="`${currentCase.rootNode.id}-${index}`"
-                >
-                    {{ choice.text }}
-                </li>
-            </ol>
+            <h3>The trial</h3>
+            <!-- Only the opening node ships with the case; every node after it
+                 arrives from POST /api/cases/:id/turn. -->
+            <div v-if="node" aria-live="polite">
+                <p>{{ node.speaker }}: {{ node.statement }}</p>
+                <p v-if="node.evidenceIds.length > 0">
+                    Exhibits in play: {{ node.evidenceIds.join(", ") }}
+                </p>
+                <ul>
+                    <!-- Keyed by position because the index IS the identifier
+                         the api takes back: choices carry no id of their own. -->
+                    <li v-for="(choice, index) in node.choices" :key="`${node.id}-${index}`">
+                        <button type="button" :disabled="turning" @click="choose(index)">
+                            {{ choice.text }}
+                        </button>
+                    </li>
+                </ul>
+            </div>
+
+            <div v-else-if="outcome" aria-live="polite">
+                <h4>{{ outcome.verdict.replaceAll("_", " ") }}</h4>
+                <p>Defense score: {{ outcome.score }}/100</p>
+                <!-- The truth is the api's to hand over, and only here: this is
+                     the first moment the player is allowed to know it. -->
+                <p>What actually happened: {{ outcome.truth.summary }}</p>
+                <p v-if="outcome.truth.misleadingEvidenceIds.length > 0">
+                    Misleading exhibits: {{ outcome.truth.misleadingEvidenceIds.join(", ") }}
+                </p>
+                <button type="button" @click="startTrial">Try the case again</button>
+            </div>
+
+            <p>Revealed so far: {{ revealedEvidenceIds.join(", ") || "nothing yet" }}</p>
         </section>
     </main>
 </template>

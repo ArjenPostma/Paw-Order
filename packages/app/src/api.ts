@@ -1,4 +1,4 @@
-import type { CaseAccepted, CaseStatusResponse } from "@paw-order/shared";
+import type { CaseAccepted, CaseStatusResponse, TurnResponse } from "@paw-order/shared";
 
 // VITE_API_URL is build-time: empty in dev (the Vite proxy makes /api
 // same-origin), the Railway api origin in the Cloudflare Pages build.
@@ -36,4 +36,19 @@ export async function fetchCase(id: string): Promise<CaseStatusResponse> {
     const response = await fetch(apiUrl(`/api/cases/${id}`));
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseStatusResponse;
+}
+
+/**
+ * Plays the run so far. `path` is every choice index taken from the opening
+ * node onwards; the api holds the state and replays it, so the client sends the
+ * whole path each turn rather than tracking a score it is not trusted with.
+ */
+export async function playTurn(id: string, path: number[]): Promise<TurnResponse> {
+    const response = await fetch(apiUrl(`/api/cases/${id}/turn`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+    });
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
+    return (await readJson(response)) as TurnResponse;
 }
