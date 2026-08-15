@@ -14,7 +14,7 @@ import {
 } from "@/cases_bundle/services/case_prompt";
 import { validateFacts, validateTree } from "@/cases_bundle/services/case_validator";
 import type { ValidationResult } from "@/cases_bundle/services/case_validator";
-import { uploadImage } from "@/storage/r2";
+import { uploadImage, uploadThumbnail } from "@/storage/r2";
 
 export interface GeneratedCase {
     bible: CaseBible;
@@ -134,7 +134,12 @@ async function renderEvidence(
     const results = await Promise.allSettled(
         evidence.map(async (exhibit) => {
             const image = await generateImage(exhibit.imagePrompt, photo, signal);
-            return uploadImage(image.bytes, image.mimeType, "evidence", signal);
+            const full = await uploadImage(image.bytes, image.mimeType, "evidence", signal);
+            // Sequential, not concurrent: the resize is CPU work on bytes the
+            // upload above already holds, and every exhibit in the case is
+            // running this same block at once.
+            const thumb = await uploadThumbnail(image.bytes, "evidence", signal);
+            return { full, thumb };
         }),
     );
 
@@ -148,10 +153,14 @@ async function renderEvidence(
             );
             return exhibit;
         }
-        if (result.value.key !== null) {
-            storedKeys.push(result.value.key);
+        const { full, thumb } = result.value;
+        if (full.key !== null) {
+            storedKeys.push(full.key);
         }
-        return { ...exhibit, imageUrl: result.value.url };
+        if (thumb?.key != null) {
+            storedKeys.push(thumb.key);
+        }
+        return { ...exhibit, imageUrl: full.url, thumbUrl: thumb?.url ?? null };
     });
 
     // One pictureless exhibit is a survivable trial. All of them is not a case -

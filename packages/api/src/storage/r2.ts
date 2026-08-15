@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import sharp from "sharp";
 import { requireEnv, resolveAppEnv } from "@/config/env";
 
 /**
@@ -89,6 +90,42 @@ export async function uploadImage(
     );
 
     return { url: `${requireEnv("R2_PUBLIC_URL").replace(/\/+$/, "")}/${key}`, key };
+}
+
+/**
+ * Width of the strip copy: the courtroom paints a 216px tile, doubled so it
+ * stays sharp on a 2x screen. The full exhibit is still what the lightbox opens.
+ */
+const THUMBNAIL_WIDTH = 432;
+
+/**
+ * Writes a strip-sized webp beside an exhibit and returns it, or null.
+ *
+ * Never throws. A missing thumbnail costs bytes on the strip; a thrown one would
+ * fail an exhibit that has a perfectly good image, and the caller treats a
+ * failed exhibit as pictureless.
+ */
+export async function uploadThumbnail(
+    bytes: Buffer,
+    prefix: string,
+    signal?: AbortSignal,
+): Promise<StoredImage | null> {
+    try {
+        const resized = await sharp(bytes)
+            // withoutEnlargement so an image that arrives smaller than the tile
+            // is re-encoded rather than upscaled into a bigger file than the
+            // original it is meant to save.
+            .resize({ width: THUMBNAIL_WIDTH, withoutEnlargement: true })
+            .webp({ quality: 80 })
+            .toBuffer();
+        return await uploadImage(resized, "image/webp", prefix, signal);
+    } catch (error: unknown) {
+        console.error(
+            "[paw-order-api] thumbnail failed; the strip falls back to the full image",
+            error,
+        );
+        return null;
+    }
 }
 
 /**

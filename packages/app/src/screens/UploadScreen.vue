@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import type { PlayedCase } from "@/history";
+import { downscale } from "@/image";
 
 // `previous` is a prop, not a localStorage read of this screen's own: dropping a
 // dead case has to update the strip, and remounting this component to re-read it
@@ -29,7 +30,7 @@ const rejected = ref<string | null>(null);
  * picker itself lets a determined user switch to "All Files" - so neither path
  * can be trusted to have filtered anything.
  */
-function take(file: File | undefined): void {
+async function take(file: File | undefined): Promise<void> {
     if (!file) {
         return;
     }
@@ -42,7 +43,9 @@ function take(file: File | undefined): void {
         return;
     }
     rejected.value = null;
-    emit("photo", file, name.value.trim());
+    // Checked before the resize, not after: the limits above are the api's, and
+    // what the api sees is only ever smaller than what was picked here.
+    emit("photo", await downscale(file), name.value.trim());
 }
 
 function onFileChange(event: Event): void {
@@ -55,7 +58,7 @@ function onFileChange(event: Event): void {
     // change event, so the obvious response to "try another photo" - try the
     // same one again, since the failure is usually transient - does nothing.
     input.value = "";
-    take(file);
+    void take(file);
 }
 
 /**
@@ -75,7 +78,7 @@ function onDragLeave(event: DragEvent): void {
 
 function onDrop(event: DragEvent): void {
     dragging.value = false;
-    take(event.dataTransfer?.files[0]);
+    void take(event.dataTransfer?.files[0]);
 }
 </script>
 

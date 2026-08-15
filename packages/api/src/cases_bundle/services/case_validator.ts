@@ -234,6 +234,7 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
             label: check.string(source, "label", path),
             imagePrompt: check.string(source, "imagePrompt", path),
             imageUrl: null,
+            thumbUrl: null,
             visualFacts,
         };
     });

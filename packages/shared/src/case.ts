@@ -36,6 +36,13 @@ export interface Evidence {
     /** R2 URL, null until the image job completes. */
     imageUrl: string | null;
     /**
+     * R2 URL of a strip-sized copy of the same image, null when the exhibit has
+     * no image or the resize failed. The courtroom strip paints a 216px tile; a
+     * full 1024px exhibit is 1.5-2.5MB of it. Callers fall back to `imageUrl`,
+     * which is also what every case generated before this field existed has.
+     */
+    thumbUrl: string | null;
+    /**
      * What is actually visible in the image. The trial may only reference
      * these; it must never invent a visual claim (gamedesign.md §13).
      */
@@ -72,7 +79,10 @@ export type PublicWitness = Pick<Witness, "id" | "name" | "claim">;
  *
  * Pick rather than Omit, for the same fail-open reason as PublicWitness.
  */
-export type PublicEvidence = Pick<Evidence, "id" | "label" | "imageUrl" | "visualFacts">;
+export type PublicEvidence = Pick<
+    Evidence,
+    "id" | "label" | "imageUrl" | "thumbUrl" | "visualFacts"
+>;
 
 /** State deltas applied when a choice is taken. Negative values allowed. */
 export interface GameEffects {

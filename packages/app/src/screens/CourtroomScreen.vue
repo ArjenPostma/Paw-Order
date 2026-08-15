@@ -166,9 +166,13 @@ onMounted(() => statementRef.value?.focus());
                                 type="button"
                                 @click="openExhibit(exhibit)"
                             >
+                                <!-- The strip copy when the generator wrote one;
+                                     cases from before it existed still have only
+                                     the full exhibit. The lightbox below always
+                                     opens the full one. -->
                                 <img
                                     class="exhibit__image"
-                                    :src="exhibit.imageUrl"
+                                    :src="exhibit.thumbUrl ?? exhibit.imageUrl"
                                     :alt="`${exhibit.label}. Enlarge.`"
                                     loading="lazy"
                                 />

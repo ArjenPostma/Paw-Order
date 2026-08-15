@@ -141,6 +141,7 @@ export function publicEvidence(exhibit: Evidence): PublicEvidence {
         id: exhibit.id,
         label: exhibit.label,
         imageUrl: exhibit.imageUrl,
+        thumbUrl: exhibit.thumbUrl,
         visualFacts: exhibit.visualFacts,
     };
 }
