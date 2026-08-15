@@ -1,4 +1,5 @@
 import type { Crime, Evidence, TrialNode, Truth, VerdictRules, Witness } from "@paw-order/shared";
+import { pathBounds, verdictCanVary } from "@paw-order/shared";
 
 /**
  * Model output is untrusted input. These two functions are the only door it gets
@@ -444,6 +445,20 @@ export function validateTree(
     }
     if (verdictRules.suspiciousAtSuspicion <= 0) {
         check.errors.push("tree.verdictRules.suspiciousAtSuspicion must be positive");
+    }
+    // Positive thresholds are not enough: they also have to sit inside what the
+    // tree can actually be played to. A case the player cannot win is allowed
+    // (gamedesign.md 8 and 10); a case where every run ends on the same verdict
+    // is not, because then no choice decides anything. Checked here rather than
+    // repaired, for the same reason unreachable nodes are: a clamped threshold
+    // is a quietly different game than the one the model designed.
+    if (verdictRules.acquitAtDoubt > 0) {
+        const bounds = pathBounds(nodes, rootNodeId);
+        if (!verdictCanVary(bounds, verdictRules)) {
+            check.errors.push(
+                `tree.verdictRules put every run on the same verdict: doubt spans ${String(bounds.minDoubt)} to ${String(bounds.maxDoubt)} against an acquitAtDoubt of ${String(verdictRules.acquitAtDoubt)}`,
+            );
+        }
     }
 
     return check.finish({ nodes, rootNodeId, verdictRules });

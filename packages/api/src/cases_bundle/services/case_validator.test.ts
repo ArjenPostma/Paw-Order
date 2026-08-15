@@ -233,6 +233,51 @@ describe("validateTree", () => {
         expect(errorsOf(result)).toContain("speaker");
     });
 
+    it("accepts a case the player cannot win but can still argue", () => {
+        // The fixture's best run reaches 55 doubt against an acquitAtDoubt of
+        // 60, so acquittal is impossible. That is a hard case, not a broken one
+        // (gamedesign.md 8), and the run still crosses the reasonable-doubt
+        // line, so the choices decide something.
+        expect(validateTree(fixtureTree(), evidence).ok).toBe(true);
+    });
+
+    it("rejects a tree whose verdict no run can move off GUILTY", () => {
+        const result = validateTree(
+            brokenTree((tree) => {
+                tree.verdictRules.acquitAtDoubt = 250;
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("same verdict");
+    });
+
+    it("rejects a tree that acquits whatever the player does", () => {
+        const result = validateTree(
+            brokenTree((tree) => {
+                tree.verdictRules.acquitAtDoubt = 1;
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("same verdict");
+    });
+
+    it("does not walk a cyclic tree forever while collecting its errors", () => {
+        const result = validateTree(
+            brokenTree((tree) => {
+                const choice = tree.nodes[5]?.choices[0];
+                expect(choice).toBeDefined();
+                if (choice) {
+                    choice.nextNodeId = "N1";
+                }
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("cycle");
+    });
+
     it("clamps an effect magnitude instead of rejecting the tree", () => {
         const result = validateTree(
             brokenTree((tree) => {
