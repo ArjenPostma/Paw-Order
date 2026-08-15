@@ -50,6 +50,10 @@ const entered = ref(false);
 // that dropping a dead case updates the list without remounting the screen and
 // wiping whatever the player had typed into the defendant name field.
 const previous = ref(playedCases());
+// The id of the case being fetched by a tile click, or null. Drives the strip's
+// own status line; a replay is usually fast, but on a cold cache it is a network
+// round trip with nothing else on screen to say so.
+const opening = ref<string | null>(null);
 
 /** The one place a READY case becomes the case being played. */
 function openCase(ready: PublicCase): void {
@@ -75,9 +79,13 @@ async function onReplay(id: string): Promise<void> {
     run += 1;
     const thisRun = run;
     error.value = null;
+    // Normally a cache revalidation and over in a moment, which is why this is a
+    // line on the strip rather than the whole preparing screen - that one talks
+    // about generation, which is not what is happening.
+    opening.value = id;
 
     try {
-        const result = await fetchCase(id);
+        const result = await fetchCase(id, true);
         if (thisRun !== run) {
             return;
         }
@@ -96,7 +104,14 @@ async function onReplay(id: string): Promise<void> {
             dropCase(id);
             return;
         }
-        error.value = cause instanceof Error ? cause.message : "That case would not open.";
+        // Only the api's own copy is worth showing. Anything else here is a
+        // transport failure, whose message is "Failed to fetch" or a JSON parse
+        // error against a proxy's HTML - neither of which is for a player.
+        error.value = cause instanceof ApiError ? cause.message : "That case would not open.";
+    } finally {
+        // Unconditional, superseded runs included: the strip must never be left
+        // showing a case as opening after a new one has taken over.
+        opening.value = null;
     }
 }
 
@@ -253,6 +268,7 @@ async function onPhoto(file: File, name: string): Promise<void> {
         v-if="screen === 'upload'"
         :error="error"
         :previous="previous"
+        :opening="opening"
         @photo="onPhoto"
         @replay="onReplay"
     />

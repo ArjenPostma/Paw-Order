@@ -32,6 +32,11 @@ function read(): unknown {
     }
 }
 
+// The api's own shape check, mirrored. `id` is not just any string: it goes
+// straight into a URL path, so an entry holding "../../health" would send the
+// replay click to an arbitrary path on the api origin.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Written by an older build, hand-edited, or corrupted: check every field. */
 function isPlayedCase(value: unknown): value is PlayedCase {
     if (typeof value !== "object" || value === null) {
@@ -40,6 +45,7 @@ function isPlayedCase(value: unknown): value is PlayedCase {
     return (
         "id" in value &&
         typeof value.id === "string" &&
+        UUID_PATTERN.test(value.id) &&
         "name" in value &&
         typeof value.name === "string" &&
         "title" in value &&

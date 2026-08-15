@@ -78,6 +78,12 @@ export async function uploadImage(
             Key: key,
             Body: bytes,
             ContentType: contentType,
+            // The key carries a fresh uuid, so these bytes are immutable by
+            // construction. Without this the browser falls back to heuristic
+            // freshness - 10% of an object's age, which is ~0 for one written
+            // seconds ago - and re-downloads every dog photo and exhibit on each
+            // render instead of answering from its own cache.
+            CacheControl: "public, max-age=31536000, immutable",
         }),
         { abortSignal: signal },
     );

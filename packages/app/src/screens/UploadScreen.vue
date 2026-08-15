@@ -5,7 +5,7 @@ import type { PlayedCase } from "@/history";
 // `previous` is a prop, not a localStorage read of this screen's own: dropping a
 // dead case has to update the strip, and remounting this component to re-read it
 // would throw away whatever the player had typed into the name field.
-defineProps<{ error: string | null; previous: PlayedCase[] }>();
+defineProps<{ error: string | null; previous: PlayedCase[]; opening: string | null }>();
 const emit = defineEmits<{ photo: [file: File, name: string]; replay: [id: string] }>();
 
 // Matches MAX_NAME_LENGTH in the api's router, which cuts it again anyway.
@@ -128,9 +128,27 @@ function onDrop(event: DragEvent): void {
              paid for belongs on the same screen as the way to a new one. -->
         <section v-if="previous.length > 0" class="prior">
             <h2 class="field-label">Cases on file</h2>
+
+            <!-- Always mounted, so it can announce: a live region only speaks
+                 when it was already in the accessibility tree before its text
+                 changed. Usually blank, because a replay is usually a cache
+                 revalidation and over before it is read. -->
+            <p class="prior__status" aria-live="polite">
+                {{ opening ? "Pulling the file" : "" }}
+            </p>
+
             <ul class="prior__strip">
                 <li v-for="played in previous" :key="played.id">
-                    <button class="prior__case" type="button" @click="$emit('replay', played.id)">
+                    <!-- Not disabled while one is opening: a second click is
+                         safe (App.vue's run counter supersedes the first fetch
+                         rather than racing it), and disabling would drop the
+                         tiles out of the accessibility tree mid-interaction. -->
+                    <button
+                        class="prior__case"
+                        type="button"
+                        :aria-busy="opening === played.id"
+                        @click="$emit('replay', played.id)"
+                    >
                         <!-- Absent when the api inlined the photo as a data URL:
                              see rememberCase. The placard stands in for it. -->
                         <img
@@ -140,8 +158,11 @@ function onDrop(event: DragEvent): void {
                             alt=""
                             loading="lazy"
                         />
+                        <!-- Array.from, not slice: a name starting with an
+                             astral character would otherwise lose half its
+                             surrogate pair and render as a replacement glyph. -->
                         <span v-else class="prior__photo prior__photo--none" aria-hidden="true">
-                            {{ played.name.slice(0, 1) }}
+                            {{ Array.from(played.name)[0] }}
                         </span>
                         <span class="prior__name">{{ played.name }}</span>
                         <span class="prior__charge">{{ played.charge }}</span>
@@ -306,6 +327,23 @@ function onDrop(event: DragEvent): void {
     padding-top: 1rem;
     border-top: var(--rule);
     text-align: left;
+}
+
+/* Height held whether or not it has text, so the strip does not jump when a
+   case starts opening. */
+.prior__status {
+    min-height: 1.1rem;
+    margin: 0.35rem 0 0;
+    font-family: var(--transcript);
+    font-size: 0.75rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+}
+
+.prior__case[aria-busy="true"] {
+    opacity: 0.55;
+    cursor: progress;
 }
 
 .prior__strip {

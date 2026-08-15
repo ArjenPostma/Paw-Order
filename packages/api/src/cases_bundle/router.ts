@@ -18,8 +18,16 @@ const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// eslint-disable-next-line no-control-regex -- taking control characters out of a name is the point
-const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/g;
+// C0, DEL and C1, plus the invisible formatting characters. The formatting ones
+// are not control characters and not \s, so without them here a name of 32 zero
+// width spaces counts as filled, the "The dog" fallback never fires, and the
+// defendant renders as nothing at all on the arrest sheet, the caption, the
+// verdict line and the tile placard. U+202E does worse: it reverses the text
+// around it on all four.
+/* eslint-disable no-control-regex -- taking control characters out of a name is the point */
+const CONTROL_CHARACTERS =
+    /[\u0000-\u001F\u007F-\u009F\u00AD\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+/* eslint-enable no-control-regex */
 
 // Memory storage: the photo goes straight to R2, it never touches local disk.
 // fields/parts matter as much as fileSize - busboy defaults them to Infinity, so
@@ -84,11 +92,12 @@ const rejectWhenBusy: RequestHandler = (_req, res, next) => {
 
 /**
  * The one place the player's own words enter the generator, so it is the one
- * place they are cut down to size. Control characters go first: a newline would
- * otherwise let a "name" close the fence factsPrompt wraps it in and address the
- * model directly. Whitespace is collapsed so the cut at MAX_NAME_LENGTH cannot
- * land inside a run of spaces, and a name that is empty afterwards falls back to
- * the default rather than reaching the prompt as nothing.
+ * place they are cut down to size. Control and formatting characters go first,
+ * so what reaches the prompt is a line of visible text rather than something
+ * that only looks like one. Whitespace is collapsed so the cut at
+ * MAX_NAME_LENGTH cannot land inside a run of spaces, and a name that is empty
+ * afterwards falls back to the default rather than reaching the prompt as
+ * nothing. factsPrompt then JSON-quotes whatever survives.
  */
 function sanitiseName(body: unknown): string {
     const value =
@@ -96,7 +105,16 @@ function sanitiseName(body: unknown): string {
     if (typeof value !== "string") {
         return DEFAULT_DEFENDANT_NAME;
     }
-    const cleaned = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/g, " ").trim();
+    // Cut to a bounded prefix FIRST. busboy's own fieldSize default lets this
+    // arrive as 1MB of text, and rewriting all of it twice and then exploding it
+    // into a per-code-point array to keep 32 characters is ~10MB of garbage per
+    // request. A code point is at most two UTF-16 units, so twice the budget
+    // cannot drop any of the first MAX_NAME_LENGTH of them.
+    const cleaned = value
+        .slice(0, MAX_NAME_LENGTH * 2)
+        .replace(CONTROL_CHARACTERS, " ")
+        .replace(/\s+/g, " ")
+        .trim();
     // Array.from splits by code point, not by UTF-16 unit: a plain slice can cut
     // a surrogate pair in half, and the lone half renders as U+FFFD on the arrest
     // sheet, in the courtroom caption and on the verdict line.

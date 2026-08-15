@@ -15,6 +15,12 @@ export function apiUrl(path: string): string {
  * the courtroom with every choice disabled and no error to explain it.
  */
 const TURN_TIMEOUT_MS = 15000;
+/**
+ * A case read is a primary-key lookup, so it is fast or it is broken - same
+ * reasoning as the turn deadline above. It bounds one poll attempt, not the poll
+ * loop, which has its own attempt and consecutive-failure ceilings.
+ */
+const FETCH_TIMEOUT_MS = 15000;
 
 /**
  * Carries the status alongside the message. A caller that has to tell "this case
@@ -69,8 +75,24 @@ export async function createCase(photo: File, name: string): Promise<CaseAccepte
     return (await readJson(response)) as CaseAccepted;
 }
 
-export async function fetchCase(id: string): Promise<CaseStatusResponse> {
-    const response = await fetch(apiUrl(`/api/cases/${id}`));
+/**
+ * `fresh` revalidates instead of reading the browser's own cache. A READY case
+ * answers `immutable, max-age=31536000`, which is right for the poll loop and
+ * wrong for replay: a case the api has since dropped would be served from disk
+ * forever, so the tile could never be found dead and removed.
+ */
+export async function fetchCase(id: string, fresh = false): Promise<CaseStatusResponse> {
+    let response;
+    try {
+        response = await fetch(apiUrl(`/api/cases/${id}`), {
+            cache: fresh ? "no-cache" : "default",
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+    } catch {
+        // Includes the timeout. Without a deadline a stalled connection leaves
+        // the player on a screen that never changes and never explains itself.
+        throw new Error("The clerk did not come back. Try that again.");
+    }
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseStatusResponse;
 }
