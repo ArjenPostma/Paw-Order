@@ -1,4 +1,4 @@
-import { MoreThan } from "typeorm";
+import { LessThan, MoreThan } from "typeorm";
 import type { CaseAccepted, CaseBible, CaseStatusResponse } from "@paw-order/shared";
 import { publicEvidence, publicNode, publicWitness } from "@paw-order/shared";
 import type { GeneratedImage } from "@/ai/gemini";
@@ -165,10 +165,65 @@ async function insertPendingCase(
 }
 
 /**
+ * Marks PENDING rows past the generation deadline as FAILED. Their runGeneration
+ * died with the process that started it - no timer is left to fail them, and the
+ * client would poll a row nobody is working on until it gives up.
+ *
+ * The deadline filter is what makes this safe to run at any moment rather than
+ * only at boot: a row still inside it may be a live generation, either one of
+ * this process's own or - during an overlapping deploy - one in the container
+ * that is still serving. Past the deadline no generation can still be running
+ * anywhere, because every one of them carries an AbortController set to exactly
+ * this timeout.
+ */
+export async function failStalePendingCases(): Promise<number> {
+    const { affected } = await repository().update(
+        { status: "PENDING", createdAt: LessThan(new Date(Date.now() - TIMEOUT_MS)) },
+        { status: "FAILED" },
+    );
+    // Postgres and better-sqlite3 both report a count here, but the driver
+    // contract allows null, and a swept row is not worth a crash at boot.
+    return affected ?? 0;
+}
+
+/**
+ * Sweeps at boot and once more a deadline later, then stops.
+ *
+ * The second pass is not housekeeping, it is the whole point: a row uploaded
+ * seconds before the previous process died is still inside its deadline when
+ * this one boots, so the first sweep passes over it deliberately, and boot is
+ * the last chance anything looks. One more pass a deadline later catches
+ * exactly that window, by which time the row cannot be alive anywhere. Without
+ * it the client polls a dead row for its full three minutes - the symptom the
+ * sweep exists to remove, just moved.
+ *
+ * ponytail: two passes, not a running timer. A crash while this process is up
+ * strands its own rows until the next boot; a real queue with visibility
+ * timeouts is the fix if that ever matters.
+ */
+export function sweepStalePendingCases(): void {
+    const run = (): void => {
+        failStalePendingCases()
+            .then((swept) => {
+                if (swept > 0) {
+                    console.log(`[paw-order-api] failed ${String(swept)} stale pending case(s)`);
+                }
+            })
+            .catch((error: unknown) => {
+                // Housekeeping. Losing it costs a stale row, and an unhandled
+                // rejection would cost the process.
+                console.error("[paw-order-api] could not sweep stale pending cases", error);
+            });
+    };
+    run();
+    // unref: a pending sweep must never be the reason the process stays up.
+    setTimeout(run, TIMEOUT_MS).unref();
+}
+
+/**
  * ponytail: fire-and-forget in the api process. A deploy or crash mid-run leaves
- * the row PENDING forever with no one to finish it — the client gives up polling
- * and the player re-uploads. Fix when that matters: a startup sweep that FAILs
- * stale PENDING rows, or a real queue.
+ * the row PENDING with no one to finish it until a sweep reaches it. A real
+ * queue is the fix if that gap matters.
  */
 async function runGeneration(
     id: string,

@@ -1,5 +1,4 @@
 import "reflect-metadata";
-import { createApp } from "@/app";
 import { assertAppEnvExplicit, assertProductionEnv, resolveAppEnv } from "@/config/env";
 
 const PORT = Number(process.env.PORT ?? 4270);
@@ -8,12 +7,16 @@ async function main(): Promise<void> {
     assertAppEnvExplicit();
     assertProductionEnv(resolveAppEnv());
 
-    // Imported dynamically, and only after the assertions: data_source.ts builds
-    // AppDataSource at module-evaluation time, so a static import would throw
-    // "DATABASE_URL is required" during the import and pre-empt the aggregated
-    // list of everything that is actually missing.
+    // Every import below is dynamic, and every one of them has to stay that way:
+    // data_source.ts builds AppDataSource at module-evaluation time, so a static
+    // import anywhere in this file - including one that only reaches it through
+    // app.ts's router - throws "DATABASE_URL is required" during the import and
+    // pre-empts the aggregated list of everything that is actually missing.
     const { AppDataSource } = await import("@/database_bundle/util/data_source");
     await AppDataSource.initialize();
+
+    const { createApp } = await import("@/app");
+    const { sweepStalePendingCases } = await import("@/cases_bundle/services/case_service");
 
     const server = createApp().listen(PORT, () => {
         console.log(`[paw-order-api] listening on http://localhost:${PORT}`);
@@ -24,6 +27,13 @@ async function main(): Promise<void> {
         console.error("[paw-order-api] failed to bind port", error);
         process.exit(1);
     });
+
+    // After listen(), never before: this is a full scan of the cases table -
+    // nothing indexes status or createdAt - and blocking the port on it would
+    // let a housekeeping query fail the platform's health check. Nothing it
+    // touches can be a row this process created, so it is safe to run while
+    // requests are already being served.
+    sweepStalePendingCases();
 }
 
 main().catch((error: unknown) => {

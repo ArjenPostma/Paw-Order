@@ -10,7 +10,7 @@ import {
 } from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
 import { CaseEntity } from "@/cases_bundle/models/case_entity";
-import { generationSlotsInUse } from "@/cases_bundle/services/case_service";
+import { failStalePendingCases, generationSlotsInUse } from "@/cases_bundle/services/case_service";
 
 // Smallest valid PNG (1x1, transparent).
 const PNG_1X1 = Buffer.from(
@@ -193,6 +193,38 @@ describe("api wiring", () => {
 
         expect(retry.status).toBe(202);
         expect(retry.body.id).not.toBe(first.body.id);
+    });
+
+    // The row's own runGeneration died with the process that started it, so
+    // nothing will ever fail it and the client polls a generation nobody is
+    // running. The boot sweep is what ends that, and only for rows past the
+    // deadline - a fresh PENDING row at boot cannot exist, but failing one
+    // would kill a live generation the day the sweep is called from anywhere
+    // else.
+    it("fails stale PENDING rows at boot and leaves fresh ones alone", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const stale = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+        const fresh = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+        await pollUntilReady(stale.body.id);
+        await pollUntilReady(fresh.body.id);
+
+        await repository.update(stale.body.id, {
+            status: "PENDING",
+            createdAt: new Date(Date.now() - positiveIntEnv("GENERATION_TIMEOUT_MS", 120_000) - 1),
+        });
+        await repository.update(fresh.body.id, { status: "PENDING", createdAt: new Date() });
+
+        // Not an exact count: earlier tests strand stale PENDING rows of their
+        // own in this shared in-memory database, and the sweep takes those too.
+        expect(await failStalePendingCases()).toBeGreaterThanOrEqual(1);
+        expect((await repository.findOneByOrFail({ id: stale.body.id })).status).toBe("FAILED");
+        expect((await repository.findOneByOrFail({ id: fresh.body.id })).status).toBe("PENDING");
     });
 
     // The other half: a PENDING run that is still inside its deadline IS the
