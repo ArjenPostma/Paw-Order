@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { GameState, TrialNode } from "@paw-order/shared";
 import {
+    deriveVerdictRules,
+    enumerateEndings,
     initialState,
     pathBounds,
     resolveVerdict,
     scoreDefense,
     takeChoice,
-    verdictCanVary,
 } from "@paw-order/shared";
 import { fixtureTree } from "@/cases_bundle/services/case_fixture";
 
-const RULES = { acquitAtDoubt: 60, suspiciousAtSuspicion: 50 };
+const RULES = { acquitAtDoubt: 60, reasonableDoubtAtDoubt: 30, suspiciousAtSuspicion: 50 };
 
 /**
  * Plays a run from the root, one choice index per node visited. Returns the
@@ -117,7 +118,7 @@ describe("resolveVerdict", () => {
         expect(resolveVerdict(stateWith(60, 50), RULES)).toBe("NOT_GUILTY_BUT_SUSPICIOUS");
     });
 
-    it("convicts with reasonable doubt at half the acquittal threshold", () => {
+    it("convicts with reasonable doubt at the reasonable-doubt threshold", () => {
         expect(resolveVerdict(stateWith(30, 0), RULES)).toBe("GUILTY_BUT_REASONABLE_DOUBT");
     });
 
@@ -175,27 +176,104 @@ describe("pathBounds", () => {
     });
 });
 
-describe("verdictCanVary", () => {
-    const bounds = { minDoubt: 10, maxDoubt: 55, maxCredibility: 30 };
+/** One node whose single choice ends the trial with the given effects. */
+function ending(id: string, doubt: number, suspicion: number): TrialNode {
+    return {
+        id,
+        speaker: "JUDGE",
+        statement: "Anything further?",
+        evidenceIds: [],
+        choices: [
+            {
+                text: "No.",
+                effects: { doubt, credibility: 0, suspicion, revealsEvidenceIds: [] },
+                nextNodeId: null,
+            },
+        ],
+    };
+}
 
-    it("accepts a case the player can lose but still swing", () => {
-        // Acquittal is out of reach at 60, which gamedesign 8 sanctions, but
-        // the run still crosses the reasonable-doubt line at 30.
-        expect(verdictCanVary(bounds, RULES)).toBe(true);
+describe("enumerateEndings", () => {
+    it("returns the state every run of the fixture arrives at", () => {
+        const { nodes, rootNodeId } = fixtureTree();
+        const endings = enumerateEndings(nodes, rootNodeId);
+        expect(endings).toBeDefined();
+        // Hand-walked: eight runs, two of which concede at the first question.
+        expect(endings?.map((state) => state.doubt).sort((a, b) => a - b)).toEqual([
+            10, 10, 20, 25, 40, 45, 50, 55,
+        ]);
     });
 
-    it("rejects a case no run can move off GUILTY", () => {
-        expect(verdictCanVary(bounds, { ...RULES, acquitAtDoubt: 250 })).toBe(false);
+    it("stops at a node already on the run rather than looping forever", () => {
+        const loop: TrialNode[] = [
+            {
+                id: "A",
+                speaker: "JUDGE",
+                statement: "Again?",
+                evidenceIds: [],
+                choices: [
+                    {
+                        text: "Again.",
+                        effects: { doubt: 5, credibility: 0, suspicion: 0, revealsEvidenceIds: [] },
+                        nextNodeId: "A",
+                    },
+                ],
+            },
+        ];
+        expect(enumerateEndings(loop, "A")).toEqual([]);
     });
 
-    it("rejects a case every run acquits", () => {
-        expect(verdictCanVary(bounds, { ...RULES, acquitAtDoubt: 5 })).toBe(false);
+    it("returns no runs for a root that is not in the tree", () => {
+        expect(enumerateEndings(fixtureTree().nodes, "N99")).toEqual([]);
+    });
+});
+
+describe("deriveVerdictRules", () => {
+    it("places both doubt lines inside the fixture's own spread", () => {
+        // Doubts run 10..55 over eight endings, so the 70th percentile lands on
+        // 45 and the 30th on 20 - not the 60 a model would have guessed at,
+        // which no run of this tree can reach.
+        expect(fixtureTree().verdictRules).toEqual({
+            acquitAtDoubt: 45,
+            reasonableDoubtAtDoubt: 20,
+            suspiciousAtSuspicion: 0,
+        });
     });
 
-    it("accepts a case where only the acquittal line is crossable", () => {
-        // Every run already clears reasonable doubt, so that line proves
-        // nothing; the acquittal line is the one the player is playing for.
-        expect(verdictCanVary({ ...bounds, minDoubt: 40, maxDoubt: 70 }, RULES)).toBe(true);
+    it("makes all four verdicts reachable on the fixture", () => {
+        const { nodes, rootNodeId, verdictRules } = fixtureTree();
+        const endings = enumerateEndings(nodes, rootNodeId) ?? [];
+        const reached = new Set(endings.map((state) => resolveVerdict(state, verdictRules)));
+        expect([...reached].sort()).toEqual([
+            "GUILTY",
+            "GUILTY_BUT_REASONABLE_DOUBT",
+            "NOT_GUILTY",
+            "NOT_GUILTY_BUT_SUSPICIOUS",
+        ]);
+    });
+
+    it("refuses a tree whose runs all total the same doubt", () => {
+        const flat = enumerateEndings([ending("A", 5, 0)], "A") ?? [];
+        expect(deriveVerdictRules(flat)).toBeNull();
+    });
+
+    it("refuses a tree with no runs at all", () => {
+        expect(deriveVerdictRules([])).toBeNull();
+    });
+
+    it("leaves every acquittal clean when suspicion cannot split them", () => {
+        // All three acquitting runs share one suspicion total, so there is no
+        // value that taints some and not others. The threshold goes out of
+        // reach rather than tainting the lot.
+        const endings = [
+            { doubt: 0, credibility: 0, suspicion: 7, revealedEvidenceIds: [] },
+            { doubt: 20, credibility: 0, suspicion: 7, revealedEvidenceIds: [] },
+            { doubt: 20, credibility: 0, suspicion: 7, revealedEvidenceIds: [] },
+            { doubt: 20, credibility: 0, suspicion: 7, revealedEvidenceIds: [] },
+        ];
+        const rules = deriveVerdictRules(endings);
+        expect(rules).toBeDefined();
+        expect(rules?.suspiciousAtSuspicion).toBe(8);
     });
 });
 

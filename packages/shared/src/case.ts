@@ -89,9 +89,17 @@ export interface TrialNode {
     choices: Choice[];
 }
 
+/**
+ * Derived from the finished tree, never generated: see deriveVerdictRules. A
+ * model asked for these picks them before it knows what its own effects total,
+ * which put ~80% of runs on NOT_GUILTY and left NOT_GUILTY_BUT_SUSPICIOUS
+ * unreachable across every case sampled.
+ */
 export interface VerdictRules {
     /** Doubt at or above this acquits. */
     acquitAtDoubt: number;
+    /** Doubt at or above this convicts with reasonable doubt rather than outright. */
+    reasonableDoubtAtDoubt: number;
     /** Suspicion at or above this taints an acquittal. */
     suspiciousAtSuspicion: number;
 }

@@ -90,7 +90,9 @@ export const FACTS_SCHEMA: Schema = {
  */
 export const TREE_SCHEMA: Schema = {
     type: Type.OBJECT,
-    required: ["rootNodeId", "nodes", "verdictRules"],
+    // No verdictRules: the thresholds are derived from the finished tree by
+    // deriveVerdictRules, not chosen by the model. See case_validator.ts.
+    required: ["rootNodeId", "nodes"],
     properties: {
         rootNodeId: STRING,
         nodes: {
@@ -138,14 +140,6 @@ export const TREE_SCHEMA: Schema = {
                 },
             },
         },
-        verdictRules: {
-            type: Type.OBJECT,
-            required: ["acquitAtDoubt", "suspiciousAtSuspicion"],
-            properties: {
-                acquitAtDoubt: NUMBER,
-                suspiciousAtSuspicion: NUMBER,
-            },
-        },
     },
 };
 
@@ -168,7 +162,12 @@ Rules:
 - The crime must be petty, domestic and harmless: stolen food, a destroyed
   cushion, a missing garden gnome. No violence, no injury, no real crime, no
   people harmed, no other animals harmed.
-- charge reads like a docket entry, e.g. "Grand Theft Birthday Cake".
+- charge reads like a docket entry a child could parse. Name the actual thing
+  that happened. No legal jargon - no "Larceny", no "First-Degree", no "Unlawful
+  Consumption", no Latin, no "artisanal". Vary the grammar rather than filling in
+  one pattern: "Cushion Destruction", "Sausage Theft", "Digging Up the Tulips",
+  "Sock Removal Without Consent", "Eating the Entire Cake". Do not reuse the
+  wording or the shape of these examples.
 - title reads like a case name, e.g. "The Great Birthday Cake Heist".
 - timeline entries are "HH:MM - what happened", in ascending order.
 - truth.summary is the hidden reality of what actually happened. It may make the
@@ -180,16 +179,37 @@ Rules:
 - Exactly ${String(WITNESS_COUNT)} witnesses, with ids exactly ${WITNESS_IDS.join(", ")}.
   At least one witness must be unreliable (reliable: false).
 
-The exhibits are the important part. Each one becomes a real generated image:
+The exhibits are the important part. Each one becomes a real generated image,
+and the trial is only allowed to talk about what that image actually shows. A
+visual fact the picture does not contain is the worst thing you can write here.
+
 - imagePrompt is the instruction for an image model that also receives this same
-  dog photo. Describe a photograph: the scene, where the dog is, and every detail
-  that must be legible. Say "the dog from the reference photo" rather than naming
-  a breed. Ask for no text or captions in the image.
+  dog photo. Describe one ordinary photograph somebody took at the scene: the
+  setting, where the dog is, and every object that must be visible. Say "the dog
+  from the reference photo" rather than naming a breed.
+- Photograph a decisive detail CLOSE. If an exhibit exists to show one thing - a
+  clock, a smear, a set of prints - say that it fills the frame, square to the
+  camera, with the room only behind it. The same detail in the corner of a wide
+  shot comes back too small to read, which is the single most common way an
+  exhibit fails.
+- Ask for no lettering anywhere in the picture: no caption, sign, label, receipt,
+  timestamp, watermark, digital display, or security camera framing. Image models
+  garble written characters, so a fact that has to be read is a fact the trial
+  cannot use.
+- A clock is the exception, and only when it is drawn rather than written. Ask
+  for an analogue face with plain markers and NO numerals, and say where each
+  hand points: "a round white wall clock filling the frame, plain black markers
+  and no numerals, the short hour hand just past the 2, the long minute hand on
+  the 4". Never ask the image for the characters "14:22", and never ask for a
+  digital clock. Hands render; digits do not.
 - visualFacts lists what a person would literally SEE in that photograph, one
   fact per entry, in plain language: "white frosting around the dog's mouth",
-  "a wall clock reading 14:22". Not conclusions, not intentions, not backstory —
-  only what is visible. Everything in visualFacts must be something imagePrompt
-  actually asks for.
+  "a wall clock showing twenty past two", "two sets of pawprints of different
+  sizes". Not conclusions, not intentions, not backstory.
+- Avoid facts about orientation or absence: upside down, backwards, inside out,
+  empty, missing. They come back wrong - a dish asked for upside down arrives
+  sitting upright. Say what is there and where it is.
+- Everything in visualFacts must be something imagePrompt actually asks for.
 - At least one exhibit must contain a detail that contradicts a witness claim, so
   the player has something to find.
 
@@ -270,7 +290,10 @@ Effects are the player's running state. Each is a delta between -20 and 25:
 - doubt: reasonable doubt established. High doubt acquits.
 - credibility: how seriously the court takes the defense.
 - suspicion: how guilty the dog looks. High suspicion taints an acquittal.
-Set acquitAtDoubt between 50 and 70, suspiciousAtSuspicion between 40 and 60.
+Do not set any thresholds. The engine reads the finished tree and places them
+itself, so what matters is that the three totals SPREAD across the endings: a
+run that concedes everything and a run that fights everything must not arrive at
+similar numbers. Suspicion has to vary as widely as doubt does.
 
 Design rules:
 - No obviously correct choice. Every option trades something: pressing a

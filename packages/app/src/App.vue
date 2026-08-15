@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, ref } from "vue";
 import type {
     PublicCase,
     PublicEvidence,
@@ -8,23 +8,12 @@ import type {
     Verdict,
 } from "@paw-order/shared";
 import { createCase, fetchCase, playTurn } from "@/api";
+import ArrestScreen from "@/screens/ArrestScreen.vue";
+import CourtroomScreen from "@/screens/CourtroomScreen.vue";
+import PreparingScreen from "@/screens/PreparingScreen.vue";
+import UploadScreen from "@/screens/UploadScreen.vue";
+import VerdictScreen from "@/screens/VerdictScreen.vue";
 
-/**
- * brand.md is the authority for player-facing wording, and gamedesign.md 9
- * spells these four out with their punctuation. A Record rather than a
- * replaceAll over the enum: adding a verdict should be a compile error here,
- * not a de-underscored identifier shipped to a player.
- */
-const VERDICT_COPY: Record<Verdict, string> = {
-    NOT_GUILTY: "NOT GUILTY",
-    NOT_GUILTY_BUT_SUSPICIOUS: "NOT GUILTY, BUT SUSPICIOUS",
-    GUILTY_BUT_REASONABLE_DOUBT: "GUILTY, BUT REASONABLE DOUBT",
-    GUILTY: "GUILTY",
-};
-
-// Infrastructure shell only, deliberately unstyled: proves upload -> generation
-// -> poll -> client. The real screens (Landing, Case introduction, Courtroom,
-// Verdict) come later.
 const POLL_INTERVAL_MS = 2000;
 // 3 minutes. Past this the generation is almost certainly a lost background job
 // (see the ponytail note in case_service.ts) rather than a slow one.
@@ -36,7 +25,7 @@ const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 
 const currentCase = ref<PublicCase | null>(null);
 const error = ref<string | null>(null);
-const status = ref<"idle" | "preparing" | "ready">("idle");
+const preparing = ref(false);
 
 /**
  * The run. `path` is the whole list of choice indexes taken so far: the api
@@ -53,24 +42,23 @@ const outcome = ref<{ verdict: Verdict; score: number; truth: Truth } | null>(nu
 // One turn in flight at a time: two clicks would otherwise push two indexes and
 // send a path the player never chose.
 const turning = ref(false);
-// Focused after every turn. Without it the button that was just pressed is
-// destroyed by the re-render and focus falls to document.body, so a keyboard
-// player tabs past the upload field and every exhibit again on each question.
-const statementRef = ref<HTMLElement | null>(null);
+// The arrest screen is a beat, not a state the api knows about: a ready case
+// waits here until the player enters court.
+const entered = ref(false);
 
-/**
- * Exhibit labels, not ids: "E2" is a database key, and the label is already on
- * the exhibit the verdict hands back.
- */
-const misleadingExhibits = computed(() => {
-    const ids = new Set(outcome.value?.truth.misleadingEvidenceIds ?? []);
-    return exhibits.value.filter((exhibit) => ids.has(exhibit.id)).map((exhibit) => exhibit.label);
+/** gamedesign.md 14: one screen at a time, in order. */
+const screen = computed(() => {
+    if (preparing.value) {
+        return "preparing";
+    }
+    if (!currentCase.value) {
+        return "upload";
+    }
+    if (!entered.value) {
+        return "arrest";
+    }
+    return outcome.value ? "verdict" : "courtroom";
 });
-
-async function focusStatement(): Promise<void> {
-    await nextTick();
-    statementRef.value?.focus();
-}
 
 function startTrial(): void {
     path.value = [];
@@ -82,6 +70,23 @@ function startTrial(): void {
     // and no way back; and a failed turn's alert survived into the next run.
     turning.value = false;
     error.value = null;
+}
+
+function enterCourt(): void {
+    startTrial();
+    entered.value = true;
+}
+
+/** Back to the envelope. The api holds no run state, so nothing to tear down. */
+function takeAnotherCase(): void {
+    run += 1;
+    currentCase.value = null;
+    entered.value = false;
+    outcome.value = null;
+    node.value = null;
+    exhibits.value = [];
+    error.value = null;
+    preparing.value = false;
 }
 
 async function choose(index: number): Promise<void> {
@@ -111,7 +116,6 @@ async function choose(index: number): Promise<void> {
         } else {
             node.value = turn.node;
         }
-        void focusStatement();
     } catch (cause) {
         if (thisRun !== run) {
             return;
@@ -132,25 +136,13 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function onFileChange(event: Event): Promise<void> {
-    const input = event.target;
-    if (!(input instanceof HTMLInputElement)) {
-        return;
-    }
-    const file = input.files?.[0];
-    // Cleared immediately: without this, re-picking the SAME photo fires no
-    // change event, so the obvious response to "try another photo" - try the
-    // same one again, since the failure is usually transient - does nothing.
-    input.value = "";
-    if (!file) {
-        return;
-    }
-
+async function onPhoto(file: File): Promise<void> {
     run += 1;
     const thisRun = run;
-    status.value = "preparing";
+    preparing.value = true;
     error.value = null;
     currentCase.value = null;
+    entered.value = false;
 
     try {
         const accepted = await createCase(file);
@@ -178,8 +170,7 @@ async function onFileChange(event: Event): Promise<void> {
 
             if (result.status === "READY") {
                 currentCase.value = result;
-                status.value = "ready";
-                startTrial();
+                preparing.value = false;
                 return;
             }
             if (result.status === "FAILED") {
@@ -192,129 +183,43 @@ async function onFileChange(event: Event): Promise<void> {
             return;
         }
         error.value = cause instanceof Error ? cause.message : "Upload failed.";
-        status.value = "idle";
+        preparing.value = false;
     }
 }
 </script>
 
 <template>
-    <main>
-        <h1>Paw &amp; Order</h1>
-        <p>Justice for every good boy.</p>
+    <UploadScreen v-if="screen === 'upload'" :error="error" @photo="onPhoto" />
 
-        <label>
-            Dog photo
-            <input
-                type="file"
-                accept="image/*"
-                :disabled="status === 'preparing'"
-                @change="onFileChange"
-            />
-        </label>
+    <PreparingScreen v-else-if="screen === 'preparing'" />
 
-        <p aria-live="polite">
-            {{ status === "preparing" ? "Preparing the case. This takes about a minute..." : "" }}
-        </p>
-        <p role="alert">{{ error }}</p>
+    <ArrestScreen
+        v-else-if="screen === 'arrest' && currentCase"
+        :current-case="currentCase"
+        @enter="enterCourt"
+    />
 
-        <section v-if="currentCase">
-            <h2>{{ currentCase.crime.title }}</h2>
-            <p>DEFENDANT: {{ currentCase.defendant.name }}</p>
-            <p>CHARGE: {{ currentCase.crime.charge }}</p>
-            <p>LOCATION: {{ currentCase.crime.location }}</p>
-            <img :src="currentCase.defendant.photoUrl" alt="The defendant" width="240" />
+    <CourtroomScreen
+        v-else-if="screen === 'courtroom' && currentCase && node"
+        :node="node"
+        :exhibits="exhibits"
+        :witnesses="currentCase.witnesses"
+        :charge="currentCase.crime.charge"
+        :defendant-name="currentCase.defendant.name"
+        :question="path.length + 1"
+        :turning="turning"
+        :error="error"
+        @choose="choose"
+    />
 
-            <h3>Exhibits</h3>
-            <!-- Only what the trial has actually put in play. The case no longer
-                 arrives with the full set: reading every exhibit up front let a
-                 player cross-reference the clock against a witness claim and
-                 work out who was lying before the first question. -->
-            <p v-if="exhibits.length === 0">No exhibits entered yet.</p>
-            <figure v-for="exhibit in exhibits" :key="exhibit.id">
-                <img
-                    v-if="exhibit.imageUrl"
-                    :src="exhibit.imageUrl"
-                    :alt="exhibit.label"
-                    width="240"
-                    loading="lazy"
-                />
-                <figcaption>
-                    {{ exhibit.id }} — {{ exhibit.label }}
-                    <ul>
-                        <!-- Keyed by position, not by the text: visualFacts is
-                             model output with no uniqueness constraint, and two
-                             identical entries would collide. -->
-                        <li
-                            v-for="(fact, index) in exhibit.visualFacts"
-                            :key="`${exhibit.id}-${index}`"
-                        >
-                            {{ fact }}
-                        </li>
-                    </ul>
-                </figcaption>
-            </figure>
-
-            <h3>Witnesses</h3>
-            <ul>
-                <li v-for="witness in currentCase.witnesses" :key="witness.id">
-                    {{ witness.name }}: {{ witness.claim }}
-                </li>
-            </ul>
-
-            <h3>Examination</h3>
-            <!-- ONE live region, always mounted, with the branches inside it. A
-                 region only announces when it was already in the accessibility
-                 tree before its content changed, so putting aria-live on the
-                 two blocks that swap meant the verdict was never announced at
-                 all. -->
-            <div aria-live="polite">
-                <!-- Only the opening node ships with the case; every node after
-                     it arrives from POST /api/cases/:id/turn. -->
-                <template v-if="node">
-                    <!-- tabindex -1 so focus can be moved here after each turn;
-                         it is not in the tab order itself. -->
-                    <p ref="statementRef" tabindex="-1">{{ node.speaker }}: {{ node.statement }}</p>
-                    <p v-if="turning">Objection pending...</p>
-                    <ul aria-label="Respond">
-                        <!-- Keyed by position because the index IS the
-                             identifier the api takes back: choices carry no id
-                             of their own. -->
-                        <li v-for="(choice, index) in node.choices" :key="`${node.id}-${index}`">
-                            <!-- aria-disabled, not disabled: a disabled button
-                                 leaves the tab order and the accessibility tree
-                                 entirely, so an in-flight turn reads as the
-                                 controls vanishing. choose() already refuses a
-                                 second turn while one is running. -->
-                            <button type="button" :aria-disabled="turning" @click="choose(index)">
-                                {{ choice.text }}
-                            </button>
-                        </li>
-                    </ul>
-                </template>
-
-                <template v-else-if="outcome">
-                    <p ref="statementRef" tabindex="-1">VERDICT</p>
-                    <h4>{{ VERDICT_COPY[outcome.verdict] }}</h4>
-                    <p>Defense Performance: {{ outcome.score }}/100</p>
-                    <!-- The truth is the api's to hand over, and only here: this
-                         is the first moment the player is allowed to know it. -->
-                    <p>What actually happened: {{ outcome.truth.summary }}</p>
-                    <p v-if="misleadingExhibits.length > 0">
-                        Exhibits that misled the court: {{ misleadingExhibits.join("; ") }}
-                    </p>
-                    <button type="button" @click="startTrial">Retry This Case</button>
-                </template>
-            </div>
-        </section>
-    </main>
+    <VerdictScreen
+        v-else-if="screen === 'verdict' && currentCase && outcome"
+        :verdict="outcome.verdict"
+        :score="outcome.score"
+        :truth="outcome.truth"
+        :exhibits="exhibits"
+        :defendant-name="currentCase.defendant.name"
+        @again="enterCourt"
+        @new-case="takeAnotherCase"
+    />
 </template>
-
-<style>
-body {
-    font-family: system-ui, sans-serif;
-    margin: 2rem;
-}
-input[type="file"] {
-    cursor: pointer;
-}
-</style>

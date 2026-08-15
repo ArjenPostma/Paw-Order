@@ -233,39 +233,42 @@ describe("validateTree", () => {
         expect(errorsOf(result)).toContain("speaker");
     });
 
-    it("accepts a case the player cannot win but can still argue", () => {
-        // The fixture's best run reaches 55 doubt against an acquitAtDoubt of
-        // 60, so acquittal is impossible. That is a hard case, not a broken one
-        // (gamedesign.md 8), and the run still crosses the reasonable-doubt
-        // line, so the choices decide something.
-        expect(validateTree(fixtureTree(), evidence).ok).toBe(true);
+    it("derives the thresholds from the tree rather than reading them", () => {
+        // The model is not asked for verdictRules and cannot supply them: one
+        // sent anyway is ignored, and the returned thresholds are the ones
+        // deriveVerdictRules computes from the fixture's own endings.
+        const result = validateTree(
+            { ...fixtureTree(), verdictRules: { acquitAtDoubt: 999 } },
+            evidence,
+        );
+        expect(result.ok).toBe(true);
+        expect(result.ok && result.value.verdictRules).toEqual({
+            acquitAtDoubt: 45,
+            reasonableDoubtAtDoubt: 20,
+            suspiciousAtSuspicion: 0,
+        });
     });
 
-    it("rejects a tree whose verdict no run can move off GUILTY", () => {
+    it("rejects a tree where every run totals the same doubt", () => {
+        // Structurally fine, but no choice moves the verdict, so the trial is a
+        // cutscene (gamedesign.md 7).
         const result = validateTree(
             brokenTree((tree) => {
-                tree.verdictRules.acquitAtDoubt = 250;
+                for (const node of tree.nodes) {
+                    for (const choice of node.choices) {
+                        choice.effects.doubt = 0;
+                    }
+                }
             }),
             evidence,
         );
         expect(result.ok).toBe(false);
-        expect(errorsOf(result)).toContain("same doubt verdict");
+        expect(errorsOf(result)).toContain("decides the verdict");
     });
 
-    it("rejects a tree that acquits whatever the player does", () => {
-        const result = validateTree(
-            brokenTree((tree) => {
-                tree.verdictRules.acquitAtDoubt = 1;
-            }),
-            evidence,
-        );
-        expect(result.ok).toBe(false);
-        expect(errorsOf(result)).toContain("same doubt verdict");
-    });
-
-    it("does not blame verdictRules for a graph that is already broken", () => {
-        // Both of the root's choices dangle, so the reachable span collapses to
-        // 5-10 and the variance check would fire on top of the real errors. The
+    it("does not blame the thresholds for a graph that is already broken", () => {
+        // Both of the root's choices dangle, so the only runs left total 5 and
+        // 10 doubt and the derivation would fire on top of the real errors. The
         // whole error list is fed back as retry instructions, so a phantom
         // "fix your thresholds" line spends the one remaining attempt on a
         // repair that was never needed.
@@ -281,10 +284,7 @@ describe("validateTree", () => {
         );
         expect(result.ok).toBe(false);
         expect(errorsOf(result)).toContain("unknown node");
-        // "doubt spans" rather than the headline wording: it appears in the
-        // variance error whatever that sentence is phrased as, so this stays a
-        // real anchor if the message is ever reworded.
-        expect(errorsOf(result)).not.toContain("doubt spans");
+        expect(errorsOf(result)).not.toContain("decides the verdict");
     });
 
     it("does not walk a cyclic tree forever while collecting its errors", () => {

@@ -66,7 +66,7 @@ function placeholderBible(photoUrl: string): CaseBible {
         witnesses: [],
         nodes: [],
         rootNodeId: "",
-        verdictRules: { acquitAtDoubt: 60, suspiciousAtSuspicion: 50 },
+        verdictRules: { acquitAtDoubt: 0, reasonableDoubtAtDoubt: 0, suspiciousAtSuspicion: 0 },
     };
 }
 
