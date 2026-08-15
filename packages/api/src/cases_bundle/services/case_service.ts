@@ -1,4 +1,4 @@
-import { In } from "typeorm";
+import { MoreThan } from "typeorm";
 import type { CaseAccepted, CaseBible, CaseStatusResponse } from "@paw-order/shared";
 import { publicEvidence, publicNode, publicWitness } from "@paw-order/shared";
 import type { GeneratedImage } from "@/ai/gemini";
@@ -120,7 +120,21 @@ export async function createCase(
  */
 export async function findReusableCase(photoHash: string): Promise<CaseAccepted | null> {
     const entity = await repository().findOne({
-        where: { photoHash, status: In(["READY", "PENDING"]) },
+        where: [
+            { photoHash, status: "READY" },
+            // Only a generation that could still be alive. runGeneration is
+            // fire-and-forget in this process, so a deploy or crash mid-run
+            // strands the row PENDING with nobody left to fail it - and an
+            // unbounded match here handed that corpse back to every future
+            // upload of the same photo, forever. The player's natural retry
+            // (same file, same name) was the one thing that could never
+            // recover. Past the deadline the row falls through and generates.
+            {
+                photoHash,
+                status: "PENDING",
+                createdAt: MoreThan(new Date(Date.now() - TIMEOUT_MS)),
+            },
+        ],
         // Newest wins. Two rows can share a hash: a PENDING one that later
         // failed leaves the row FAILED and the retry inserts another.
         order: { createdAt: "DESC" },

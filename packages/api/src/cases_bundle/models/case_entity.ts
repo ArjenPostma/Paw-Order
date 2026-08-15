@@ -37,8 +37,14 @@ export class CaseEntity {
 
     /**
      * sha256 of the uploaded bytes together with the defendant name, so the same
-     * photo submitted twice returns the case already generated for it rather
-     * than paying for a second one.
+     * photo submitted twice returns the case already generated for it.
+     *
+     * This is a convenience, NOT a cost control, and nothing may be relaxed on
+     * the strength of it. It matches byte-identical uploads only: one changed
+     * pixel, one byte appended past the end of the file, or "rex" for "Rex" is a
+     * new digest and a full-price case. Against anyone trying to spend money it
+     * saves nothing at all; what it saves is the honest player re-uploading the
+     * photo they already played, and the case slot that would have cost them.
      *
      * The name is inside the digest, not beside it: the prompts write it through
      * the whole bible - the charge, the title, the timeline, every witness claim

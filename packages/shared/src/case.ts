@@ -196,10 +196,19 @@ export const CASE_STATUSES = ["PENDING", "READY", "FAILED"] as const;
 
 export type CaseStatus = (typeof CASE_STATUSES)[number];
 
-/** What POST /api/cases answers: the case does not exist yet, only its id. */
+/**
+ * What POST /api/cases answers: an id and nothing else. 202 when the case was
+ * accepted for generation, 200 when an identical upload already had one.
+ *
+ * `truth?: never` for the same reason PublicCase and both CaseStatusResponse
+ * arms carry it, and it matters more here since the dedupe: this is now built
+ * from a database row rather than a local literal, so a later
+ * `return { ...entity }` would typecheck and ship the whole bible.
+ */
 export interface CaseAccepted {
     id: string;
     status: CaseStatus;
+    truth?: never;
 }
 
 /**

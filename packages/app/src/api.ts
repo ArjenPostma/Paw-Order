@@ -37,6 +37,23 @@ export class ApiError extends Error {
     }
 }
 
+/**
+ * Retry-After in words. The per-minute limiter and the per-day one share this
+ * header, so a raw second count read fine for the first ("in 42s") and absurd
+ * for the second, which sent the player "Another case can be opened in 86400s."
+ */
+function waitFor(seconds: number): string {
+    if (seconds < 90) {
+        return `Another case can be opened in ${String(Math.ceil(seconds))}s.`;
+    }
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 90) {
+        return `Another case can be opened in ${String(minutes)} minutes.`;
+    }
+    const hours = Math.ceil(minutes / 60);
+    return `Another case can be opened in ${String(hours)} hours.`;
+}
+
 async function readJson(response: Response): Promise<unknown> {
     if (!response.ok) {
         // The api sends an actionable message ("max 8MB", "Case not found");
@@ -47,13 +64,10 @@ async function readJson(response: Response): Promise<unknown> {
         const text = typeof message === "string" ? message : `Request failed (${response.status})`;
         // The limiter already computes how long the wait is; saying "shortly"
         // and dropping the number leaves the player guessing whether to retry
-        // now or give up. Seconds, because the window is a minute.
+        // now or give up.
         const retryAfter = Number(response.headers.get("Retry-After"));
         if (response.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
-            throw new ApiError(
-                `${text} Another case can be opened in ${String(retryAfter)}s.`,
-                response.status,
-            );
+            throw new ApiError(`${text} ${waitFor(retryAfter)}`, response.status);
         }
         throw new ApiError(text, response.status);
     }

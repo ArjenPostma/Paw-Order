@@ -155,9 +155,67 @@ describe("api wiring", () => {
         expect(again.status).toBe(200);
         expect(again.body.id).toBe(first.body.id);
         expect(again.body.status).toBe("READY");
+        // An id and a status, nothing else. This body is the only one in the api
+        // built from a database row rather than a literal, so it is the one that
+        // would ship the whole bible if it were ever widened to the entity.
+        expect(Object.keys(again.body).sort()).toEqual(["id", "status"]);
         // The id matching is not enough on its own: nothing may have been
         // inserted, and no photo written, on the way to answering with it.
         expect(await AppDataSource.getRepository(CaseEntity).count()).toBe(before);
+    });
+
+    // The trap the FAILED exclusion was written to avoid, reached by the other
+    // route. runGeneration is fire-and-forget, so a deploy or crash mid-run
+    // strands a row PENDING with nobody left to fail it; matching that row
+    // forever meant the player's natural retry - same photo, same name - could
+    // never produce a case again.
+    it("regenerates rather than joining a PENDING run that is past its deadline", async () => {
+        const photo = freshPhoto();
+
+        const first = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", photo, { filename: "dog.png", contentType: "image/png" });
+        expect(first.status).toBe(202);
+        await pollUntilReady(first.body.id);
+
+        // Strand it: PENDING, and older than any generation could still be.
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const stale = new Date(
+            Date.now() - positiveIntEnv("GENERATION_TIMEOUT_MS", 120_000) - 1000,
+        );
+        await repository.update(first.body.id, { status: "PENDING", createdAt: stale });
+
+        const retry = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", photo, { filename: "dog.png", contentType: "image/png" });
+
+        expect(retry.status).toBe(202);
+        expect(retry.body.id).not.toBe(first.body.id);
+    });
+
+    // The other half: a PENDING run that is still inside its deadline IS the
+    // generation already going for those bytes, and a double-submit joins it
+    // rather than starting a second one.
+    it("joins a PENDING run that is still within its deadline", async () => {
+        const photo = freshPhoto();
+
+        const first = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", photo, { filename: "dog.png", contentType: "image/png" });
+        expect(first.status).toBe(202);
+        await pollUntilReady(first.body.id);
+        await AppDataSource.getRepository(CaseEntity).update(first.body.id, { status: "PENDING" });
+
+        const again = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", photo, { filename: "dog.png", contentType: "image/png" });
+
+        expect(again.status).toBe(200);
+        expect(again.body.id).toBe(first.body.id);
     });
 
     // The name is written through the whole bible - the charge, the timeline,

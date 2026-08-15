@@ -178,10 +178,30 @@ async function renderEvidence(
  * short on purpose, and short enough that the fall-open below is reached long
  * before any edge gives up on the request.
  */
-const DOG_CHECK_TIMEOUT_MS = positiveIntEnv("DOG_CHECK_TIMEOUT_MS", 15_000);
+const DOG_CHECK_TIMEOUT_MS = positiveIntEnv("DOG_CHECK_TIMEOUT_MS", 8_000);
+
+/**
+ * Concurrent dog checks.
+ *
+ * Each one holds the uploaded photo (up to 8MB) and the base64 copy encodeImage
+ * makes of it (~10.7MB) alive for as long as the call takes, and it runs before
+ * createCase, so the generation slot counter never sees it and never bounds it.
+ * Uncapped, that was ~19MB per in-flight upload with only a per-minute per-ip
+ * limiter deciding how many could overlap.
+ */
+const MAX_CONCURRENT_DOG_CHECKS = positiveIntEnv("DOG_CHECK_MAX_CONCURRENT", 4);
+
+let dogChecksInFlight = 0;
+
+/** Thrown when every dog-check slot is busy. The router answers 503. */
+export class DogCheckBusyError extends Error {
+    constructor() {
+        super("All dog check slots are busy.");
+    }
+}
 
 /** The one field DOG_SCHEMA asks for, narrowed off an untrusted response. */
-function saysDog(value: unknown): boolean {
+export function saysDog(value: unknown): boolean {
     return typeof value === "object" && value !== null && "isDog" in value && value.isDog === true;
 }
 
@@ -203,18 +223,36 @@ export async function looksLikeDog(photo: GeneratedImage): Promise<boolean> {
         return true;
     }
 
+    if (dogChecksInFlight >= MAX_CONCURRENT_DOG_CHECKS) {
+        throw new DogCheckBusyError();
+    }
+    dogChecksInFlight += 1;
+
     try {
         const text = await generateJson(DOG_CHECK_PROMPT, DOG_SCHEMA, {
             reference: encodeImage(photo),
             signal: AbortSignal.timeout(DOG_CHECK_TIMEOUT_MS),
         });
-        return saysDog(parseJson(text));
+        const parsed = parseJson(text);
+        if (parsed === null) {
+            // A 200 whose body is not JSON is the same class of non-answer as a
+            // thrown error, and must fall the same way. Read as a plain false it
+            // would tell a player holding a real dog that it is not a dog, which
+            // is the one outcome DOG_CHECK_PROMPT is written to avoid.
+            console.warn(
+                `[paw-order-api] dog check answered with ${String(text.length)} chars of non-JSON, letting the upload through`,
+            );
+            return true;
+        }
+        return saysDog(parsed);
     } catch (error: unknown) {
         console.error(
             `[paw-order-api] dog check did not answer (model=${TEXT_MODEL}), letting the upload through`,
             error,
         );
         return true;
+    } finally {
+        dogChecksInFlight -= 1;
     }
 }
 
