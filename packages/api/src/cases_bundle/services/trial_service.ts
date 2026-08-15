@@ -1,6 +1,7 @@
 import type { CaseBible, PublicEvidence, TurnResponse } from "@paw-order/shared";
 import {
     initialState,
+    publicEvidence,
     publicNode,
     resolveVerdict,
     scoreDefense,
@@ -47,9 +48,7 @@ export async function playTurn(id: string, path: unknown): Promise<TurnOutcome> 
  * actually hand it over.
  */
 function unlockedEvidence(bible: CaseBible, ids: Set<string>): PublicEvidence[] {
-    return bible.evidence
-        .filter((exhibit) => ids.has(exhibit.id))
-        .map(({ imagePrompt: _prompt, ...exhibit }) => exhibit);
+    return bible.evidence.filter((exhibit) => ids.has(exhibit.id)).map(publicEvidence);
 }
 
 function replayRun(bible: CaseBible, path: unknown): TurnOutcome {

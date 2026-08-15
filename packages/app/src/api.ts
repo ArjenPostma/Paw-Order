@@ -9,6 +9,13 @@ export function apiUrl(path: string): string {
     return `${BASE}${path}`;
 }
 
+/**
+ * A turn is a primary-key read and a replay of a path the client already holds,
+ * so it is fast or it is broken. Without a deadline a stalled connection leaves
+ * the courtroom with every choice disabled and no error to explain it.
+ */
+const TURN_TIMEOUT_MS = 15000;
+
 async function readJson(response: Response): Promise<unknown> {
     if (!response.ok) {
         // The api sends an actionable message ("max 8MB", "Case not found");
@@ -16,9 +23,15 @@ async function readJson(response: Response): Promise<unknown> {
         const body: unknown = await response.json().catch(() => null);
         const message =
             typeof body === "object" && body !== null && "error" in body ? body.error : undefined;
-        throw new Error(
-            typeof message === "string" ? message : `Request failed (${response.status})`,
-        );
+        const text = typeof message === "string" ? message : `Request failed (${response.status})`;
+        // The limiter already computes how long the wait is; saying "shortly"
+        // and dropping the number leaves the player guessing whether to retry
+        // now or give up. Seconds, because the window is a minute.
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        if (response.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
+            throw new Error(`${text} Another case can be opened in ${String(retryAfter)}s.`);
+        }
+        throw new Error(text);
     }
     return response.json();
 }
@@ -44,11 +57,19 @@ export async function fetchCase(id: string): Promise<CaseStatusResponse> {
  * whole path each turn rather than tracking a score it is not trusted with.
  */
 export async function playTurn(id: string, path: number[]): Promise<TurnResponse> {
-    const response = await fetch(apiUrl(`/api/cases/${id}/turn`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-    });
+    let response;
+    try {
+        response = await fetch(apiUrl(`/api/cases/${id}/turn`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path }),
+            signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
+        });
+    } catch {
+        // Includes the timeout above. The DOMException reads "signal timed out",
+        // which is not something to show a player mid-trial.
+        throw new Error("The court did not respond. Try that again.");
+    }
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as TurnResponse;
 }

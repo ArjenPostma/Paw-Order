@@ -1,0 +1,98 @@
+/*
+ * Paw & Order runs on court-file materials: manila paper, ledger ink, and a
+ * rubber stamp. Every screen is a page in one case file - the envelope, the
+ * docket, the transcript, the ruling - so they share one sheet and one palette.
+ * The trial was a dark room for a while and read as a different product.
+ */
+
+:root {
+    --paper: #e8dcc0;
+    --paper-edge: #d3c19a;
+    --paper-shade: #ddd0ad;
+    --ink: #171c26;
+    --ink-soft: #4d5567;
+    --stamp: #b3241f;
+    --filed: #35543c;
+    --tape: #c9a227;
+
+    --display: "Archivo Black", "Arial Black", system-ui, sans-serif;
+    --transcript: "Courier Prime", ui-monospace, "Courier New", monospace;
+    --ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+    --step: clamp(1rem, 0.6rem + 1.6vw, 1.75rem);
+    --rule: 1px solid var(--paper-edge);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+}
+
+body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--ui);
+    font-size: 1rem;
+    line-height: 1.5;
+    /* The manila tooth. Two soft washes rather than a noise image: it survives
+       any viewport size and costs no request. */
+    background-image:
+        radial-gradient(ellipse at 15% 0%, rgb(255 255 255 / 45%), transparent 55%),
+        radial-gradient(ellipse at 85% 100%, rgb(120 96 48 / 12%), transparent 60%);
+    background-attachment: fixed;
+}
+
+#app {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+}
+
+/*
+ * The label that runs above every panel: a clerk's field name, not a heading.
+ * Shared because the same treatment appears on all five screens and scoped
+ * copies would drift apart.
+ */
+.field-label {
+    font-family: var(--transcript);
+    font-size: 0.75rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0;
+}
+
+.docket-line {
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+}
+
+button {
+    font: inherit;
+    cursor: pointer;
+}
+
+/* Never removed, only restyled: this is the whole keyboard affordance. */
+:focus-visible {
+    outline: 3px solid var(--stamp);
+    outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}

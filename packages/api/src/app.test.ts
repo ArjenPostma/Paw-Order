@@ -147,9 +147,9 @@ describe("api wiring", () => {
     });
 
     // The reveal mechanic only means something if the exhibits are not all
-    // handed over at the door. E3's clock reads 14:22 and W1 claims 14:30, so
-    // shipping every exhibit up front let a player identify the lying witness
-    // before answering a single question (gamedesign.md 8).
+    // handed over at the door. E3's clock shows twenty past two and W1 swears
+    // half past, so shipping every exhibit up front let a player identify the
+    // lying witness before answering a single question (gamedesign.md 8).
     it("ships only the exhibits the opening statement puts in play", async () => {
         const created = await request(app)
             .post("/api/cases")
@@ -157,7 +157,7 @@ describe("api wiring", () => {
 
         const ready = await pollUntilReady(created.body.id);
         expect(ready.body.evidence.map((exhibit: { id: string }) => exhibit.id)).toEqual(["E1"]);
-        expect(JSON.stringify(ready.body)).not.toContain("14:22");
+        expect(JSON.stringify(ready.body)).not.toContain("twenty past two");
     });
 
     // The FAILED arm had no anchor at all, so a regression that served the bible
@@ -278,9 +278,10 @@ describe("trial turns", () => {
 
         expect(turn.status).toBe(200);
         expect(turn.body.status).toBe("VERDICT");
-        // 55 doubt against an acquitAtDoubt of 60: the fixture cannot be won,
-        // and still scores 95 for taking every point it offers.
-        expect(turn.body.verdict).toBe("GUILTY_BUT_REASONABLE_DOUBT");
+        // 55 doubt clears the fixture's derived acquitAtDoubt of 50, and the
+        // run presses the last point rather than resting, so it carries no
+        // suspicion and the acquittal is clean.
+        expect(turn.body.verdict).toBe("NOT_GUILTY");
         expect(turn.body.score).toBe(95);
         expect(turn.body.truth.summary).toBeTruthy();
         expect(turn.body.node).toBeUndefined();

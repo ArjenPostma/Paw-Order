@@ -11,12 +11,16 @@
  */
 
 import type {
+    Evidence,
     GameEffects,
     GameState,
+    PublicEvidence,
     PublicTrialNode,
+    PublicWitness,
     TrialNode,
     Verdict,
     VerdictRules,
+    Witness,
 } from "./case.js";
 
 export interface TrialTurn {
@@ -33,11 +37,20 @@ export interface PathBounds {
 }
 
 /**
- * A conviction below the acquittal line still carries reasonable doubt once the
- * player is halfway to it. Derived rather than generated: a third
- * model-chosen threshold is a third thing the model can set nonsensically.
+ * Where the two doubt lines sit in the spread of runs the tree can actually be
+ * played to: the top 30% of endings acquit, the bottom 30% convict outright,
+ * the middle band convicts with reasonable doubt. Quantiles rather than fixed
+ * numbers because every generated tree totals doubt on its own scale.
  */
-const REASONABLE_DOUBT_FRACTION = 0.5;
+const ACQUIT_QUANTILE = 0.7;
+const REASONABLE_DOUBT_QUANTILE = 0.3;
+/** Half the acquittals are tainted, when suspicion varies enough to split them. */
+const SUSPICIOUS_QUANTILE = 0.5;
+/**
+ * Endings are enumerated, so a pathological tree is exponential. Real ones sit
+ * around 40. Past this the tree is rejected rather than partially scored.
+ */
+const MAX_ENDINGS = 5000;
 /**
  * Doubt is what wins the case, credibility is how well it was argued, so the
  * split is heavy on doubt but not total - a player who maxes doubt by conceding
@@ -117,8 +130,46 @@ export function publicNode(node: TrialNode): PublicTrialNode {
     };
 }
 
-function reasonableDoubtAt(rules: VerdictRules): number {
-    return rules.acquitAtDoubt * REASONABLE_DOUBT_FRACTION;
+/**
+ * Strips an exhibit for the wire. Hand-written for the same reason publicNode
+ * is: the rest-spread this replaces (`({ imagePrompt: _prompt, ...exhibit })`)
+ * carries every field added to Evidence later, so a field naming who planted an
+ * exhibit would ship with no compile error and no test failure.
+ */
+export function publicEvidence(exhibit: Evidence): PublicEvidence {
+    return {
+        id: exhibit.id,
+        label: exhibit.label,
+        imageUrl: exhibit.imageUrl,
+        visualFacts: exhibit.visualFacts,
+    };
+}
+
+/** Same, for a witness: the claim, never `reliable`, never anything added later. */
+export function publicWitness(witness: Witness): PublicWitness {
+    return { id: witness.id, name: witness.name, claim: witness.claim };
+}
+
+/**
+ * What `reasonableDoubtAtDoubt` replaced: the line used to be derived as half
+ * the acquittal threshold rather than stored.
+ */
+const LEGACY_REASONABLE_DOUBT_FRACTION = 0.5;
+
+/**
+ * The reasonable-doubt line, tolerating a bible written before that line was
+ * stored. The whole Case Bible is one json column that nothing migrates and
+ * nothing re-validates on read, so its shape is a claim rather than a fact:
+ * a pre-existing row carries only acquitAtDoubt and suspiciousAtSuspicion, and
+ * a bare `state.doubt >= rules.reasonableDoubtAtDoubt` reads undefined, compares
+ * false, and silently convicts outright where the case used to allow reasonable
+ * doubt. Falling back to the old derivation keeps those cases playing as they
+ * were generated.
+ */
+function reasonableDoubtLine(rules: VerdictRules): number {
+    return Number.isFinite(rules.reasonableDoubtAtDoubt)
+        ? rules.reasonableDoubtAtDoubt
+        : rules.acquitAtDoubt * LEGACY_REASONABLE_DOUBT_FRACTION;
 }
 
 export function resolveVerdict(state: GameState, rules: VerdictRules): Verdict {
@@ -129,14 +180,130 @@ export function resolveVerdict(state: GameState, rules: VerdictRules): Verdict {
     }
     // Suspicion only ever taints an acquittal. A convicted defendant being
     // suspicious on top is not a fifth verdict.
-    return state.doubt >= reasonableDoubtAt(rules) ? "GUILTY_BUT_REASONABLE_DOUBT" : "GUILTY";
+    return state.doubt >= reasonableDoubtLine(rules) ? "GUILTY_BUT_REASONABLE_DOUBT" : "GUILTY";
 }
 
 /**
- * Walks every run from the root and reports the extremes. Used twice: to
- * calibrate the defense score against what this particular tree makes possible,
- * and by the generator's validator to reject a tree whose verdict no run can
- * move.
+ * Every run the tree can be played to, as the state the verdict would read.
+ * Null means the tree has more runs than MAX_ENDINGS, which is a rejection.
+ *
+ * Cycle-safe for the same reason pathBounds is: the validator calls this on
+ * model output, and a node already on the current path is skipped rather than
+ * recursed into. Unlike pathBounds there is no memo — the state carried in
+ * differs per path, so a node's endings are not reusable between them.
+ */
+export function enumerateEndings(nodes: TrialNode[], rootNodeId: string): GameState[] | null {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const endings: GameState[] = [];
+    const onPath = new Set<string>();
+    let overflowed = false;
+
+    const walk = (nodeId: string, state: GameState): void => {
+        const node = byId.get(nodeId);
+        if (!node || overflowed || onPath.has(nodeId)) {
+            return;
+        }
+        onPath.add(nodeId);
+        for (const choice of node.choices) {
+            const next = applyEffects(state, choice.effects);
+            if (choice.nextNodeId === null) {
+                if (endings.length >= MAX_ENDINGS) {
+                    overflowed = true;
+                    break;
+                }
+                endings.push(next);
+            } else {
+                walk(choice.nextNodeId, next);
+            }
+        }
+        onPath.delete(nodeId);
+    };
+
+    walk(rootNodeId, initialState());
+    return overflowed ? null : endings;
+}
+
+/**
+ * The value at `quantile` of an ascending list, counting only values strictly
+ * above `floor`. Null when there are none.
+ *
+ * Every threshold here has to clear the lowest run in the tree, and a plain
+ * quantile does not: on endings of 0, 0, 10, 20, 30, 40 the 30th percentile
+ * lands on 0 itself, so every run sits at or above it and the verdict below
+ * that line becomes unreachable. Ties at the minimum are not unusual - two
+ * branches that concede early bottom out at the same total - so this is the
+ * common case, not a pathological one.
+ */
+function splitAbove(sorted: number[], quantile: number, floor: number): number | null {
+    const above = sorted.filter((value) => value > floor);
+    const index = Math.min(above.length - 1, Math.floor(above.length * quantile));
+    return above[index] ?? null;
+}
+
+/**
+ * Places the verdict thresholds inside the spread of runs the tree actually
+ * offers, so the same quantiles hold whatever scale the model wrote its effects
+ * on. Null when the tree does not vary its doubt at all: then no choice decides
+ * anything and the trial is a cutscene (gamedesign.md 7).
+ */
+export function deriveVerdictRules(endings: GameState[]): VerdictRules | null {
+    if (endings.length === 0) {
+        return null;
+    }
+    const doubts = endings.map((ending) => ending.doubt).sort((a, b) => a - b);
+    const lowest = doubts[0];
+    if (lowest === undefined) {
+        return null;
+    }
+    const acquitAtDoubt = splitAbove(doubts, ACQUIT_QUANTILE, lowest);
+    // Null means nothing sits above the lowest total, so every run in the tree
+    // ends on the same doubt - the one case worth rejecting.
+    if (acquitAtDoubt === null) {
+        return null;
+    }
+    // Drawn from the runs BETWEEN the two extremes, not from the whole list.
+    // Two independent quantiles over one list can land on the same value, which
+    // empties the middle band and makes GUILTY_BUT_REASONABLE_DOUBT unreachable
+    // while both lines still look placed. When no run falls between them the
+    // tree has no middle band to offer, and the lines coincide honestly.
+    const middle = doubts.filter((doubt) => doubt > lowest && doubt < acquitAtDoubt);
+    const reasonableDoubtAtDoubt =
+        splitAbove(middle, REASONABLE_DOUBT_QUANTILE, lowest) ?? acquitAtDoubt;
+
+    // Only the runs that acquit matter here: the threshold's whole job is to
+    // split those into clean and tainted.
+    const suspicions = endings
+        .filter((ending) => ending.doubt >= acquitAtDoubt)
+        .map((ending) => ending.suspicion)
+        .sort((a, b) => a - b);
+    return {
+        acquitAtDoubt,
+        reasonableDoubtAtDoubt,
+        suspiciousAtSuspicion: suspiciousAt(suspicions),
+    };
+}
+
+/**
+ * A threshold that leaves at least one acquittal clean. Taken from the values
+ * above the lowest rather than from the list itself, because acquitting runs
+ * routinely share one suspicion total — and a quantile over ties lands ON that
+ * shared value, which would taint every acquittal in the case. When they all
+ * tie there is nothing to split, so the threshold goes out of reach instead:
+ * an untainted acquittal is the right default when the tree offers no signal.
+ */
+function suspiciousAt(sorted: number[]): number {
+    const lowest = sorted[0];
+    const highest = sorted[sorted.length - 1];
+    if (lowest === undefined || highest === undefined) {
+        return 1;
+    }
+    return splitAbove(sorted, SUSPICIOUS_QUANTILE, lowest) ?? highest + 1;
+}
+
+/**
+ * Walks every run from the root and reports the extremes, which is what the
+ * defense score is calibrated against — a run is measured by what this
+ * particular tree made possible, not on an absolute scale.
  *
  * Cycle-safe on purpose. validateTree rejects cyclic trees, but it calls this
  * before that rejection is returned, and the nodes are model output - a naive
@@ -186,30 +353,6 @@ export function pathBounds(nodes: TrialNode[], rootNodeId: string): PathBounds {
     };
 
     return byId.has(rootNodeId) ? walk(rootNodeId) : NO_BOUNDS;
-}
-
-/**
- * Whether the player's choices can actually move the verdict.
- *
- * This is deliberately not "the case must be winnable". gamedesign.md 8 lists
- * hidden truths where the dog did it, and 10 sanctions losing the case with a
- * high defense score, so a tree whose best run falls short of acquittal is a
- * legitimate hard case. What is not legitimate is a tree where every run lands
- * on the same side of both doubt lines: then the choices are decoration and the
- * trial is a cutscene. That happens in both directions - a threshold above
- * anything the tree can reach, and one below everything it can reach.
- *
- * Only the doubt axis is judged. Suspicion splits an acquittal into clean and
- * tainted, so a tree whose runs all acquit and differ only in suspicion does
- * vary its verdict and is still rejected here. That is deliberate: reaching
- * acquitAtDoubt on every path means every choice was strongly doubt-positive,
- * which the tree prompt already forbids. The error message says doubt verdict,
- * not verdict, so it does not claim more than this checks.
- */
-export function verdictCanVary(bounds: PathBounds, rules: VerdictRules): boolean {
-    return [rules.acquitAtDoubt, reasonableDoubtAt(rules)].some(
-        (threshold) => bounds.minDoubt < threshold && threshold <= bounds.maxDoubt,
-    );
 }
 
 function ratio(value: number, best: number): number {

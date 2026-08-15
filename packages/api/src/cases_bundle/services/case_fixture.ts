@@ -1,4 +1,5 @@
-import type { CaseBible } from "@paw-order/shared";
+import type { CaseBible, TrialNode } from "@paw-order/shared";
+import { deriveVerdictRules, enumerateEndings } from "@paw-order/shared";
 import type { GeneratedFacts, GeneratedTree } from "@/cases_bundle/services/case_validator";
 
 /**
@@ -51,16 +52,23 @@ export function fixtureFacts(): GeneratedFacts {
             {
                 id: "E3",
                 label: "The kitchen clock",
-                imagePrompt: "A wall clock in a kitchen, hands clearly readable.",
+                // Written the way case_prompt.ts requires a readable detail to
+                // be written, because this is the example the prompt rules were
+                // measured against: filling the frame, markers instead of
+                // numerals, and the time given as hand positions. Asking for a
+                // clock "reading 14:22" in a wide kitchen shot renders a
+                // thumbnail with scrambled digits on it.
+                imagePrompt:
+                    "A round white analogue wall clock in a kitchen, filling the frame and square to the camera, with plain black markers and no numerals. The short hour hand points just past the 2. The long minute hand points at the 4.",
                 imageUrl: null,
-                visualFacts: ["a wall clock reading 14:22"],
+                visualFacts: ["a wall clock showing twenty past two"],
             },
         ],
         witnesses: [
             {
                 id: "W1",
                 name: "Mrs Pemberton",
-                claim: "The defendant entered the kitchen at 14:30 and never left.",
+                claim: "The defendant entered the kitchen at half past two and never left.",
                 reliable: false,
             },
             {
@@ -74,160 +82,172 @@ export function fixtureFacts(): GeneratedFacts {
 }
 
 export function fixtureTree(): GeneratedTree {
-    return {
-        rootNodeId: "N1",
-        verdictRules: { acquitAtDoubt: 60, suspiciousAtSuspicion: 50 },
-        nodes: [
-            {
-                id: "N1",
-                speaker: "PROSECUTOR",
-                statement: "Your client was found beside a collapsed cake. Explain that.",
-                evidenceIds: ["E1"],
-                choices: [
-                    {
-                        text: "Being near the cake proves nothing.",
-                        effects: { doubt: 5, credibility: 0, suspicion: 0, revealsEvidenceIds: [] },
-                        nextNodeId: "N2",
+    const rootNodeId = "N1";
+    const nodes: TrialNode[] = [
+        {
+            id: "N1",
+            speaker: "PROSECUTOR",
+            statement: "Your client was found beside a collapsed cake. Explain that.",
+            evidenceIds: ["E1"],
+            choices: [
+                {
+                    text: "Being near the cake proves nothing.",
+                    effects: { doubt: 5, credibility: 0, suspicion: 0, revealsEvidenceIds: [] },
+                    nextNodeId: "N2",
+                },
+                {
+                    text: "When was this photograph taken?",
+                    effects: {
+                        doubt: 10,
+                        credibility: 5,
+                        suspicion: 0,
+                        revealsEvidenceIds: ["E3"],
                     },
-                    {
-                        text: "When was this photograph taken?",
-                        effects: {
-                            doubt: 10,
-                            credibility: 5,
-                            suspicion: 0,
-                            revealsEvidenceIds: ["E3"],
-                        },
-                        nextNodeId: "N3",
+                    nextNodeId: "N3",
+                },
+            ],
+        },
+        {
+            id: "N2",
+            speaker: "PROSECUTOR",
+            statement: "Then explain the two sets of pawprints of different sizes.",
+            evidenceIds: ["E1"],
+            choices: [
+                {
+                    text: "Two sets. So my client was not alone.",
+                    effects: {
+                        doubt: 15,
+                        credibility: 5,
+                        suspicion: -5,
+                        revealsEvidenceIds: ["E1"],
                     },
-                ],
-            },
-            {
-                id: "N2",
-                speaker: "PROSECUTOR",
-                statement: "Then explain the two sets of pawprints of different sizes.",
-                evidenceIds: ["E1"],
-                choices: [
-                    {
-                        text: "Two sets. So my client was not alone.",
-                        effects: {
-                            doubt: 15,
-                            credibility: 5,
-                            suspicion: -5,
-                            revealsEvidenceIds: ["E1"],
-                        },
-                        nextNodeId: "N4",
+                    nextNodeId: "N4",
+                },
+                {
+                    text: "That does not establish that he ate anything.",
+                    effects: {
+                        doubt: 5,
+                        credibility: -5,
+                        suspicion: 5,
+                        revealsEvidenceIds: [],
                     },
-                    {
-                        text: "That does not establish that he ate anything.",
-                        effects: {
-                            doubt: 5,
-                            credibility: -5,
-                            suspicion: 5,
-                            revealsEvidenceIds: [],
-                        },
-                        nextNodeId: null,
+                    nextNodeId: null,
+                },
+            ],
+        },
+        {
+            id: "N3",
+            speaker: "PROSECUTOR",
+            statement: "The clock in the photograph shows twenty past two.",
+            evidenceIds: ["E3"],
+            choices: [
+                {
+                    text: "Then why does your witness say half past?",
+                    effects: {
+                        doubt: 20,
+                        credibility: 10,
+                        suspicion: 0,
+                        revealsEvidenceIds: [],
                     },
-                ],
-            },
-            {
-                id: "N3",
-                speaker: "PROSECUTOR",
-                statement: "The clock in the photograph reads 14:22.",
-                evidenceIds: ["E3"],
-                choices: [
-                    {
-                        text: "Then why does your witness say 14:30?",
-                        effects: {
-                            doubt: 20,
-                            credibility: 10,
-                            suspicion: 0,
-                            revealsEvidenceIds: [],
-                        },
-                        nextNodeId: "N5",
+                    nextNodeId: "N5",
+                },
+                {
+                    text: "Thank you. No further questions.",
+                    effects: { doubt: 0, credibility: 5, suspicion: 5, revealsEvidenceIds: [] },
+                    nextNodeId: null,
+                },
+            ],
+        },
+        {
+            id: "N4",
+            speaker: "WITNESS",
+            statement: "I saw only the one dog. I am quite certain.",
+            evidenceIds: ["E1"],
+            choices: [
+                {
+                    text: "You could not see the whole kitchen from the hallway.",
+                    effects: {
+                        doubt: 15,
+                        credibility: -5,
+                        suspicion: 0,
+                        revealsEvidenceIds: [],
                     },
-                    {
-                        text: "Thank you. No further questions.",
-                        effects: { doubt: 0, credibility: 5, suspicion: 5, revealsEvidenceIds: [] },
-                        nextNodeId: null,
+                    nextNodeId: "N6",
+                },
+                {
+                    text: "No further questions.",
+                    effects: { doubt: 0, credibility: 0, suspicion: 5, revealsEvidenceIds: [] },
+                    nextNodeId: null,
+                },
+            ],
+        },
+        {
+            id: "N5",
+            speaker: "JUDGE",
+            statement: "Counsel, are you asking me to doubt the witness or the clock?",
+            evidenceIds: ["E3"],
+            choices: [
+                {
+                    text: "The clock cannot be mistaken, Your Honour.",
+                    effects: {
+                        doubt: 15,
+                        credibility: 10,
+                        suspicion: 0,
+                        revealsEvidenceIds: [],
                     },
-                ],
-            },
-            {
-                id: "N4",
-                speaker: "WITNESS",
-                statement: "I saw only the one dog. I am quite certain.",
-                evidenceIds: ["E1"],
-                choices: [
-                    {
-                        text: "You could not see the whole kitchen from the hallway.",
-                        effects: {
-                            doubt: 15,
-                            credibility: -5,
-                            suspicion: 0,
-                            revealsEvidenceIds: [],
-                        },
-                        nextNodeId: "N6",
+                    nextNodeId: "N6",
+                },
+                {
+                    text: "I withdraw the question.",
+                    effects: {
+                        doubt: -5,
+                        credibility: -10,
+                        suspicion: 5,
+                        revealsEvidenceIds: [],
                     },
-                    {
-                        text: "No further questions.",
-                        effects: { doubt: 0, credibility: 0, suspicion: 5, revealsEvidenceIds: [] },
-                        nextNodeId: null,
+                    nextNodeId: null,
+                },
+            ],
+        },
+        {
+            id: "N6",
+            speaker: "JUDGE",
+            statement: "Anything further before I rule?",
+            evidenceIds: [],
+            choices: [
+                {
+                    // The suspicion is what separates the two acquitting runs:
+                    // resting leaves it unanswered, pressing the frosting
+                    // clears it. Without that difference every acquittal on the
+                    // fixture carries the same suspicion, and deriveVerdictRules
+                    // has nothing to split them on.
+                    text: "The defense rests, Your Honour.",
+                    effects: { doubt: 5, credibility: 5, suspicion: 5, revealsEvidenceIds: [] },
+                    nextNodeId: null,
+                },
+                {
+                    text: "One final point: the frosting was never tested.",
+                    effects: {
+                        doubt: 10,
+                        credibility: -5,
+                        suspicion: 0,
+                        revealsEvidenceIds: ["E2"],
                     },
-                ],
-            },
-            {
-                id: "N5",
-                speaker: "JUDGE",
-                statement: "Counsel, are you asking me to doubt the witness or the clock?",
-                evidenceIds: ["E3"],
-                choices: [
-                    {
-                        text: "The clock cannot be mistaken, Your Honour.",
-                        effects: {
-                            doubt: 15,
-                            credibility: 10,
-                            suspicion: 0,
-                            revealsEvidenceIds: [],
-                        },
-                        nextNodeId: "N6",
-                    },
-                    {
-                        text: "I withdraw the question.",
-                        effects: {
-                            doubt: -5,
-                            credibility: -10,
-                            suspicion: 5,
-                            revealsEvidenceIds: [],
-                        },
-                        nextNodeId: null,
-                    },
-                ],
-            },
-            {
-                id: "N6",
-                speaker: "JUDGE",
-                statement: "Anything further before I rule?",
-                evidenceIds: [],
-                choices: [
-                    {
-                        text: "The defense rests, Your Honour.",
-                        effects: { doubt: 5, credibility: 5, suspicion: 0, revealsEvidenceIds: [] },
-                        nextNodeId: null,
-                    },
-                    {
-                        text: "One final point: the frosting was never tested.",
-                        effects: {
-                            doubt: 10,
-                            credibility: -5,
-                            suspicion: 0,
-                            revealsEvidenceIds: ["E2"],
-                        },
-                        nextNodeId: null,
-                    },
-                ],
-            },
-        ],
-    };
+                    nextNodeId: null,
+                },
+            ],
+        },
+    ];
+
+    // Derived, not written down: the thresholds are a function of the tree in
+    // production (see case_validator.ts), and a hand-picked pair here would let
+    // the fixture drift into a case the generator could never produce.
+    const endings = enumerateEndings(nodes, rootNodeId);
+    const verdictRules = endings === null ? null : deriveVerdictRules(endings);
+    if (verdictRules === null) {
+        throw new Error("the fixture tree does not vary its verdict");
+    }
+    return { rootNodeId, nodes, verdictRules };
 }
 
 export function fixtureBible(photoUrl: string): CaseBible {

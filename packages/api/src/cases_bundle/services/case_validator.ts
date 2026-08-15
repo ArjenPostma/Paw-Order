@@ -1,5 +1,5 @@
 import type { Crime, Evidence, TrialNode, Truth, VerdictRules, Witness } from "@paw-order/shared";
-import { pathBounds, verdictCanVary } from "@paw-order/shared";
+import { deriveVerdictRules, enumerateEndings } from "@paw-order/shared";
 
 /**
  * Model output is untrusted input. These two functions are the only door it gets
@@ -431,38 +431,36 @@ export function validateTree(
         }
     }
 
-    const rulesSource = check.record(root.verdictRules, "tree.verdictRules");
-    const verdictRules: VerdictRules = {
-        acquitAtDoubt: check.number(rulesSource, "acquitAtDoubt", "tree.verdictRules"),
-        suspiciousAtSuspicion: check.number(
-            rulesSource,
-            "suspiciousAtSuspicion",
-            "tree.verdictRules",
-        ),
+    // The thresholds are ours, not the model's. Asked for them it sets them
+    // blind, before it knows what doubt its own effects total, and the measured
+    // result was ~80% of runs acquitting with the tainted acquittal unreachable
+    // in every case sampled. Derived from the finished tree they land in the
+    // same place on every scale a model might write.
+    //
+    // Only once the graph itself is sound: enumerateEndings treats a dangling
+    // edge as an ending, so on a broken tree the spread it reports is fiction,
+    // and the whole error list goes back as retry instructions - a phantom
+    // "your runs do not vary" line would spend the one remaining attempt on a
+    // repair that was never needed. A tree with structural errors is rejected
+    // regardless.
+    let verdictRules: VerdictRules = {
+        acquitAtDoubt: 0,
+        reasonableDoubtAtDoubt: 0,
+        suspiciousAtSuspicion: 0,
     };
-    if (verdictRules.acquitAtDoubt <= 0) {
-        check.errors.push("tree.verdictRules.acquitAtDoubt must be positive");
-    }
-    if (verdictRules.suspiciousAtSuspicion <= 0) {
-        check.errors.push("tree.verdictRules.suspiciousAtSuspicion must be positive");
-    }
-    // Positive thresholds are not enough: they also have to sit inside what the
-    // tree can actually be played to. A case the player cannot win is allowed
-    // (gamedesign.md 8 and 10); a case where every run ends on the same verdict
-    // is not, because then no choice decides anything. Checked here rather than
-    // repaired, for the same reason unreachable nodes are: a clamped threshold
-    // is a quietly different game than the one the model designed.
-    // Only once the graph itself is sound. pathBounds scores a dangling edge as
-    // an ending, so on a broken tree the span it reports is fiction, and the
-    // whole error list goes back as retry instructions - a phantom "your
-    // thresholds are wrong" line spends the one remaining attempt on a repair
-    // that was never needed. A tree with structural errors is rejected anyway.
-    if (check.errors.length === 0 && verdictRules.acquitAtDoubt > 0) {
-        const bounds = pathBounds(nodes, rootNodeId);
-        if (!verdictCanVary(bounds, verdictRules)) {
-            check.errors.push(
-                `tree.verdictRules put every run on the same doubt verdict: doubt spans ${String(bounds.minDoubt)} to ${String(bounds.maxDoubt)} against an acquitAtDoubt of ${String(verdictRules.acquitAtDoubt)}`,
-            );
+    if (check.errors.length === 0) {
+        const endings = enumerateEndings(nodes, rootNodeId);
+        if (endings === null) {
+            check.errors.push("tree has too many distinct runs to score");
+        } else {
+            const derived = deriveVerdictRules(endings);
+            if (derived === null) {
+                check.errors.push(
+                    "tree gives every run the same doubt total, so no choice decides the verdict",
+                );
+            } else {
+                verdictRules = derived;
+            }
         }
     }
 

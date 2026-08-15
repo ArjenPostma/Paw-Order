@@ -25,6 +25,14 @@ export const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-l
  * gemini-3.1-flash-image). Pinned rather than left to the model's default,
  * because that default is not ours to rely on. 1K is 1024px, far more than the
  * exhibits are ever displayed at.
+ *
+ * The tiers are per model, and the allowlist below cannot know which model is
+ * configured: the -lite default accepts ONLY 1K, and asking it for 2K comes back
+ * 400 "Image size 2K is not supported for this model" on every exhibit, after
+ * the text stage has already been paid for. Raise GEMINI_IMAGE_MODEL first, then
+ * GEMINI_IMAGE_SIZE. Neither buys legibility on its own - a detail renders
+ * because the prompt puts it close to the camera, which is what case_prompt.ts
+ * asks for.
  */
 const IMAGE_SIZES = ["1K", "2K", "4K"] as const;
 const IMAGE_SIZE = resolveImageSize();
