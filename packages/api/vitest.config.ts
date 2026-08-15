@@ -15,6 +15,7 @@ export default defineConfig({
         // trip the limiter - the limiter itself is unit-tested in rate_limit.test.ts.
         env: {
             APP_ENV: "test",
+            UPLOAD_MAX_PER_MINUTE: "1000",
             GENERATION_MAX_PER_MINUTE: "1000",
             GENERATION_MAX_PER_IP_PER_DAY: "1000",
             GENERATION_MAX_PER_DAY: "1000",

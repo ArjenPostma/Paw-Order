@@ -83,9 +83,34 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
 };
 
 // Generation is anonymous and writes to paid storage, so it is capped per ip and
-// per day. Both ceilings are env-tunable so a load test (or the suite) can raise
-// them without editing code.
-const perIpLimiter = rateLimit({
+// per day. Every ceiling is env-tunable so a load test (or the suite) can raise
+// it without editing code.
+
+/**
+ * The outer per-ip bound, and the only one mounted before the body is read. It
+ * is deliberately loose: what it exists to cap is the work done on the way to
+ * deciding whether to generate at all - buffering up to 8MB of multipart, and
+ * the dog check's model call - not generation itself, which the tighter limiter
+ * below owns.
+ *
+ * Loose enough that no honest player meets it. Someone picking the wrong photo
+ * two or three times in a row is the normal case this exists to let through.
+ */
+const perIpUploadLimiter = rateLimit({
+    windowMs: 60_000,
+    max: positiveIntEnv("UPLOAD_MAX_PER_MINUTE", 10),
+});
+/**
+ * The real per-ip ceiling on generation, mounted past every check that can turn
+ * a request away without generating anything.
+ *
+ * Split out of perIpUploadLimiter for the same reason dailyBudget was split out
+ * of rateLimit: charged at the door, it was spent on requests that generated
+ * nothing. A photo with no dog in it, or one whose case already exists, would
+ * take the player's minute and answer the next upload - the one that was going
+ * to work - with 429, having produced no case for it.
+ */
+const perIpGenerationLimiter = rateLimit({
     windowMs: 60_000,
     max: positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
 });
@@ -234,20 +259,30 @@ const requireDog: RequestHandler = async (req, res, next) => {
 
 export const casesRouter = Router();
 
-// Order is load-bearing, cheapest rejection first, and every ceiling sits
-// behind every check that can reject the request without generating anything:
-// charging the daily budget before the body was parsed meant 50 photoless POSTs
-// could burn the entire day's quota and lock out every real player for 24 hours
-// at zero cost to the caller. A slot is only ever spent on a request that is
-// about to generate - which is why reuse and the dog check both come first.
+// Order is load-bearing, cheapest rejection first, and every ceiling that
+// bounds generation sits behind every check that can turn the request away
+// without generating anything. A slot - per minute, per day, or global - is
+// only ever spent on a request that is about to produce a case.
+//
+// Both times that rule was broken it cost the player rather than the attacker.
+// The daily budget, charged before the body was parsed, let 50 photoless POSTs
+// burn the whole day's quota and lock out every real player for 24 hours at no
+// cost to the caller. The per-minute limiter, charged at the door, took the
+// player's minute for a photo with no dog in it or one whose case already
+// existed, and then answered the upload that WOULD have worked with a 429.
+//
+// perIpUploadLimiter is the one exception, and only because it guards the work
+// that happens before that decision can be made: the multipart buffer and the
+// dog check's model call. It is loose for the same reason.
 casesRouter.post(
     "/",
-    perIpLimiter,
+    perIpUploadLimiter,
     rejectWhenBusy,
     uploadPhoto,
     requirePhoto,
     reuseExistingCase,
     requireDog,
+    perIpGenerationLimiter,
     perIpDailyLimiter,
     globalDailyBudget,
     async (req, res) => {
