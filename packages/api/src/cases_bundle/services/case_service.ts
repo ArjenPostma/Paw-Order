@@ -85,7 +85,10 @@ function placeholderBible(photoUrl: string): CaseBible {
  * request open, so generation continues in the background and the client polls
  * findCaseStatus.
  */
-export async function createCase(photo: GeneratedImage): Promise<CaseAccepted> {
+export async function createCase(
+    photo: GeneratedImage,
+    defendantName: string,
+): Promise<CaseAccepted> {
     if (inFlight >= MAX_CONCURRENT) {
         throw new GenerationBusyError();
     }
@@ -95,7 +98,7 @@ export async function createCase(photo: GeneratedImage): Promise<CaseAccepted> {
         const pending = await insertPendingCase(photo);
         // Deliberately not awaited: the response goes out now. runGeneration owns
         // the slot from here and never rejects.
-        void runGeneration(pending.id, pending.photoUrl, photo);
+        void runGeneration(pending.id, pending.photoUrl, photo, defendantName);
         return { id: pending.id, status: "PENDING" };
     } catch (error: unknown) {
         // Only insertPendingCase can land here; runGeneration is not awaited.
@@ -125,14 +128,24 @@ async function insertPendingCase(photo: GeneratedImage): Promise<{ id: string; p
  * and the player re-uploads. Fix when that matters: a startup sweep that FAILs
  * stale PENDING rows, or a real queue.
  */
-async function runGeneration(id: string, photoUrl: string, photo: GeneratedImage): Promise<void> {
+async function runGeneration(
+    id: string,
+    photoUrl: string,
+    photo: GeneratedImage,
+    defendantName: string,
+): Promise<void> {
     const controller = new AbortController();
     const timer = setTimeout(() => {
         controller.abort();
     }, TIMEOUT_MS);
 
     try {
-        const { bible, storedKeys } = await generateCaseBible(photoUrl, photo, controller.signal);
+        const { bible, storedKeys } = await generateCaseBible(
+            photoUrl,
+            photo,
+            defendantName,
+            controller.signal,
+        );
         try {
             await repository().update(id, { bible, status: "READY" });
         } catch (error: unknown) {

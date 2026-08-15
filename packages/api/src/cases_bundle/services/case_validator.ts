@@ -48,7 +48,6 @@ export type ValidationResult<T> = { ok: true; value: T } | { ok: false; errors: 
 
 /** Stage one: the case itself. `imageUrl` is ours to fill, never the model's. */
 export interface GeneratedFacts {
-    defendantName: string;
     crime: Crime;
     truth: Truth;
     evidence: Evidence[];
@@ -280,7 +279,6 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
     };
 
     return check.finish({
-        defendantName: check.string(root, "defendantName", "facts"),
         crime,
         truth,
         evidence,

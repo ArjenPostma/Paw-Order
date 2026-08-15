@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import type { PublicCase } from "@paw-order/shared";
 
 const props = defineProps<{ currentCase: PublicCase }>();
-defineEmits<{ enter: [] }>();
+defineEmits<{ enter: []; leave: [] }>();
 
 /** brand.md sets the format; the id is the only real number we have. */
 const docket = computed(() => `PAW-${props.currentCase.id.slice(0, 4).toUpperCase()}`);
@@ -71,6 +71,20 @@ onMounted(() => headlineRef.value?.focus());
 
             <button class="enter" type="button" @click="$emit('enter')">Enter court</button>
         </article>
+
+        <!-- The only way off this screen that is not "enter court". A replayed
+             case lands here with nothing behind it, so without this the way back
+             to the strip it was picked from is a reload.
+
+             Last in the document, drawn first by order: -1. Focus lands on the
+             headline at mount, so a leave button placed above it in the DOM is
+             one the player only reaches by tabbing backwards - past every
+             control on the sheet if they tab forwards. -->
+        <p class="leave-row">
+            <button class="leave" type="button" @click="$emit('leave')">
+                &larr; Back to the front desk
+            </button>
+        </p>
     </main>
 </template>
 
@@ -78,9 +92,35 @@ onMounted(() => headlineRef.value?.focus());
 .arrest {
     flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     padding: var(--step);
+}
+
+/* Sits on the same left edge as the file below it, which is what makes it read
+   as a way out of this sheet rather than a control on the page. */
+.leave-row {
+    order: -1;
+    width: min(56rem, 100%);
+    margin: 0 0 0.6rem;
+}
+
+.leave {
+    padding: 0.25rem 0;
+    background: none;
+    border: none;
+    color: var(--ink-soft);
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    transition: color 140ms ease;
+}
+
+.leave:hover {
+    color: var(--ink);
+    text-decoration: underline;
 }
 
 .file {

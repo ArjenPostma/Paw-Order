@@ -15,6 +15,27 @@ export function apiUrl(path: string): string {
  * the courtroom with every choice disabled and no error to explain it.
  */
 const TURN_TIMEOUT_MS = 15000;
+/**
+ * A case read is a primary-key lookup, so it is fast or it is broken - same
+ * reasoning as the turn deadline above. It bounds one poll attempt, not the poll
+ * loop, which has its own attempt and consecutive-failure ceilings.
+ */
+const FETCH_TIMEOUT_MS = 15000;
+
+/**
+ * Carries the status alongside the message. A caller that has to tell "this case
+ * is gone for good" from "the network blinked" was otherwise left matching on
+ * the api's own user-facing copy, which quietly stops working when that copy is
+ * reworded.
+ */
+export class ApiError extends Error {
+    constructor(
+        message: string,
+        readonly status: number,
+    ) {
+        super(message);
+    }
+}
 
 async function readJson(response: Response): Promise<unknown> {
     if (!response.ok) {
@@ -29,24 +50,49 @@ async function readJson(response: Response): Promise<unknown> {
         // now or give up. Seconds, because the window is a minute.
         const retryAfter = Number(response.headers.get("Retry-After"));
         if (response.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
-            throw new Error(`${text} Another case can be opened in ${String(retryAfter)}s.`);
+            throw new ApiError(
+                `${text} Another case can be opened in ${String(retryAfter)}s.`,
+                response.status,
+            );
         }
-        throw new Error(text);
+        throw new ApiError(text, response.status);
     }
     return response.json();
 }
 
 /** Returns as soon as the case has an id. The case itself is still generating. */
-export async function createCase(photo: File): Promise<CaseAccepted> {
+export async function createCase(photo: File, name: string): Promise<CaseAccepted> {
     const body = new FormData();
+    // Before the photo, which is the order multer's own docs ask for: a field
+    // that arrives after the file is not guaranteed to be on req.body while the
+    // file is being handled. Omitted entirely when blank - the api defaults it.
+    if (name) {
+        body.append("name", name);
+    }
     body.append("photo", photo);
     const response = await fetch(apiUrl("/api/cases"), { method: "POST", body });
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseAccepted;
 }
 
-export async function fetchCase(id: string): Promise<CaseStatusResponse> {
-    const response = await fetch(apiUrl(`/api/cases/${id}`));
+/**
+ * `fresh` revalidates instead of reading the browser's own cache. A READY case
+ * answers `immutable, max-age=31536000`, which is right for the poll loop and
+ * wrong for replay: a case the api has since dropped would be served from disk
+ * forever, so the tile could never be found dead and removed.
+ */
+export async function fetchCase(id: string, fresh = false): Promise<CaseStatusResponse> {
+    let response;
+    try {
+        response = await fetch(apiUrl(`/api/cases/${id}`), {
+            cache: fresh ? "no-cache" : "default",
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+    } catch {
+        // Includes the timeout. Without a deadline a stalled connection leaves
+        // the player on a screen that never changes and never explains itself.
+        throw new Error("The clerk did not come back. Try that again.");
+    }
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseStatusResponse;
 }

@@ -11,7 +11,6 @@ import type { GeneratedFacts, GeneratedTree } from "@/cases_bundle/services/case
 
 export function fixtureFacts(): GeneratedFacts {
     return {
-        defendantName: "Rumbles",
         crime: {
             charge: "Grand Theft Birthday Cake",
             title: "The Great Birthday Cake Heist",
@@ -250,11 +249,11 @@ export function fixtureTree(): GeneratedTree {
     return { rootNodeId, nodes, verdictRules };
 }
 
-export function fixtureBible(photoUrl: string): CaseBible {
+export function fixtureBible(photoUrl: string, defendantName: string): CaseBible {
     const facts = fixtureFacts();
     const tree = fixtureTree();
     return {
-        defendant: { name: facts.defendantName, photoUrl },
+        defendant: { name: defendantName, photoUrl },
         crime: facts.crime,
         truth: facts.truth,
         evidence: facts.evidence,

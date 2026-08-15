@@ -180,11 +180,12 @@ async function renderEvidence(
 export async function generateCaseBible(
     photoUrl: string,
     photo: GeneratedImage,
+    defendantName: string,
     signal: AbortSignal,
 ): Promise<GeneratedCase> {
     if (resolveAppEnv() === "test") {
         // The suite must never reach Gemini. Same guard shape as r2.ts.
-        return { bible: fixtureBible(photoUrl), storedKeys: [] };
+        return { bible: fixtureBible(photoUrl, defendantName), storedKeys: [] };
     }
 
     // Encoded once and shared by all five calls, rather than per call.
@@ -192,7 +193,7 @@ export async function generateCaseBible(
 
     const facts = await generateValidated(
         "case facts",
-        factsPrompt(),
+        factsPrompt(defendantName),
         FACTS_SCHEMA,
         validateFacts,
         { reference, signal },
@@ -205,7 +206,7 @@ export async function generateCaseBible(
     try {
         const tree = await generateValidated(
             "trial tree",
-            treePrompt({ ...facts, evidence }),
+            treePrompt({ ...facts, evidence }, defendantName),
             TREE_SCHEMA,
             (value) => validateTree(value, evidence),
             { signal },
@@ -213,7 +214,7 @@ export async function generateCaseBible(
 
         return {
             bible: {
-                defendant: { name: facts.defendantName, photoUrl },
+                defendant: { name: defendantName, photoUrl },
                 crime: facts.crime,
                 truth: facts.truth,
                 evidence,

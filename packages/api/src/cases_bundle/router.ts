@@ -8,13 +8,26 @@ import {
     findCaseStatus,
     generationSlotsAvailable,
 } from "@/cases_bundle/services/case_service";
+import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
 import { playTurn } from "@/cases_bundle/services/trial_service";
 import { dailyBudget, rateLimit } from "@/http/rate_limit";
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+/** Long enough for any dog's name, short enough that it cannot be a paragraph. */
+const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// C0, DEL and C1, plus the invisible formatting characters. The formatting ones
+// are not control characters and not \s, so without them here a name of 32 zero
+// width spaces counts as filled, the "The dog" fallback never fires, and the
+// defendant renders as nothing at all on the arrest sheet, the caption, the
+// verdict line and the tile placard. U+202E does worse: it reverses the text
+// around it on all four.
+/* eslint-disable no-control-regex -- taking control characters out of a name is the point */
+const CONTROL_CHARACTERS =
+    /[\u0000-\u001F\u007F-\u009F\u00AD\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+/* eslint-enable no-control-regex */
 
 // Memory storage: the photo goes straight to R2, it never touches local disk.
 // fields/parts matter as much as fileSize - busboy defaults them to Infinity, so
@@ -22,10 +35,15 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 // express.json's limit never applies to multipart).
 const upload = multer({
     storage: multer.memoryStorage(),
-    // parts is 2, not 1: busboy's counter rejects a lone file part at parts:1,
-    // so 1 breaks every valid upload. fields:0 is what actually stops the
-    // "one tiny file plus 100k text fields" body, files:1 the extra files.
-    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 2, fields: 0 },
+    // parts is one above the real part count, because busboy's counter rejects a
+    // lone file part at parts:1. fields is what actually stops the "one tiny file
+    // plus 100k text fields" body, files:1 the extra files. fields:1 is the
+    // optional dog name and nothing else; busboy's own 1MB fieldSize default
+    // bounds its length, and sanitiseName cuts it to MAX_NAME_LENGTH after that.
+    // Not tightened here on purpose: a fieldSize violation is a MulterError, and
+    // every MulterError answers "a photo is required", which an over-long name
+    // is not.
+    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 3, fields: 1 },
     fileFilter: (_req, file, callback) => {
         // Client-declared mime type is a hint, not proof - it caps the obvious
         // junk; the size limit is what actually bounds the request.
@@ -72,6 +90,38 @@ const rejectWhenBusy: RequestHandler = (_req, res, next) => {
     next();
 };
 
+/**
+ * The one place the player's own words enter the generator, so it is the one
+ * place they are cut down to size. Control and formatting characters go first,
+ * so what reaches the prompt is a line of visible text rather than something
+ * that only looks like one. Whitespace is collapsed so the cut at
+ * MAX_NAME_LENGTH cannot land inside a run of spaces, and a name that is empty
+ * afterwards falls back to the default rather than reaching the prompt as
+ * nothing. factsPrompt then JSON-quotes whatever survives.
+ */
+function sanitiseName(body: unknown): string {
+    const value =
+        typeof body === "object" && body !== null && "name" in body ? body.name : undefined;
+    if (typeof value !== "string") {
+        return DEFAULT_DEFENDANT_NAME;
+    }
+    // Cut to a bounded prefix FIRST. busboy's own fieldSize default lets this
+    // arrive as 1MB of text, and rewriting all of it twice and then exploding it
+    // into a per-code-point array to keep 32 characters is ~10MB of garbage per
+    // request. A code point is at most two UTF-16 units, so twice the budget
+    // cannot drop any of the first MAX_NAME_LENGTH of them.
+    const cleaned = value
+        .slice(0, MAX_NAME_LENGTH * 2)
+        .replace(CONTROL_CHARACTERS, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    // Array.from splits by code point, not by UTF-16 unit: a plain slice can cut
+    // a surrogate pair in half, and the lone half renders as U+FFFD on the arrest
+    // sheet, in the courtroom caption and on the verdict line.
+    const cut = Array.from(cleaned).slice(0, MAX_NAME_LENGTH).join("").trim();
+    return cut || DEFAULT_DEFENDANT_NAME;
+}
+
 /** Split out so the daily budget can be charged after it, never before. */
 const requirePhoto: RequestHandler = (req, res, next) => {
     if (!req.file) {
@@ -105,7 +155,12 @@ casesRouter.post(
         try {
             // 202, not 201: the case does not exist yet. Generation runs in the
             // background and the client polls GET /:id until it is READY.
-            const accepted = await createCase({ bytes: file.buffer, mimeType: file.mimetype });
+            const accepted = await createCase(
+                { bytes: file.buffer, mimeType: file.mimetype },
+                // multer parses text fields onto req.body; anything else in
+                // there is ignored, and an absent name is the default.
+                sanitiseName(req.body),
+            );
             res.status(202).json(accepted);
         } catch (error: unknown) {
             // rejectWhenBusy catches the common case; this is the lost race
