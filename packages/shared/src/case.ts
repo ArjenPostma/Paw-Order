@@ -117,19 +117,41 @@ export interface CaseBible {
 }
 
 /**
+ * A choice as the courtroom sees one: the words, nothing else.
+ *
+ * `effects` is the doubt/credibility/suspicion table. On the wire it is a
+ * solution key - sort by `effects.doubt` and the optimal path falls out without
+ * reading a line of the trial, which is exactly the "no obviously correct
+ * answer" rule in gamedesign.md section 7. `nextNodeId` is the map that makes
+ * walking it possible. Both stay server-side; the player identifies a choice by
+ * its index, and the api replays the run.
+ */
+export type PublicChoice = Omit<Choice, "effects" | "nextNodeId">;
+
+export type PublicTrialNode = Omit<TrialNode, "choices"> & { choices: PublicChoice[] };
+
+/**
  * What the client is allowed to see while the trial is running.
  *
  * `truth?: never` is load-bearing: a plain Omit is structurally satisfied by a
  * value that still carries truth (an object spread suppresses excess-property
  * checking), so `return { id, ...bible }` would typecheck and ship the answer.
  * With never, Truth is not assignable and that regression is a compile error.
+ *
+ * The trial arrives one node at a time, so `nodes` and `rootNodeId` are gone in
+ * favour of `rootNode`. `verdictRules` goes with them: the verdict is computed
+ * here now, and the thresholds are just a number to farm towards.
  */
-export type PublicCase = Omit<CaseBible, "truth" | "witnesses" | "evidence"> & {
+export type PublicCase = Omit<
+    CaseBible,
+    "truth" | "witnesses" | "evidence" | "nodes" | "rootNodeId" | "verdictRules"
+> & {
     id: string;
     truth?: never;
     /** Narrowed, not inherited: see PublicWitness and PublicEvidence. */
     witnesses: PublicWitness[];
     evidence: PublicEvidence[];
+    rootNode: PublicTrialNode;
 };
 
 export const CASE_STATUSES = ["PENDING", "READY", "FAILED"] as const;
@@ -154,6 +176,37 @@ export type CaseStatusResponse =
     // not-yet-ready path typechecks and ships the answer on every poll.
     | { id: string; status: "PENDING" | "FAILED"; truth?: never }
     | ({ status: "READY" } & PublicCase);
+
+/**
+ * A turn: the choice indexes taken so far, from the root. The run is replayed
+ * server-side on every request, which is what makes it unforgeable - no state
+ * crosses the wire, so there is none to tamper with. Bounded by the node count,
+ * and the tree is small (gamedesign.md section 6).
+ */
+export interface TurnRequest {
+    path: number[];
+}
+
+/**
+ * `truth?: never` on the NODE arm for the same reason PublicCase carries it:
+ * without it a future `return { status: "NODE", ...bible }` typechecks and
+ * ships the answer mid-trial. The VERDICT arm is the first moment the truth is
+ * allowed out (gamedesign.md sections 8 and 9).
+ */
+export type TurnResponse =
+    | {
+          status: "NODE";
+          node: PublicTrialNode;
+          revealedEvidenceIds: string[];
+          truth?: never;
+      }
+    | {
+          status: "VERDICT";
+          verdict: Verdict;
+          score: number;
+          truth: Truth;
+          revealedEvidenceIds: string[];
+      };
 
 export interface GameState {
     doubt: number;

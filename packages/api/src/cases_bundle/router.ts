@@ -8,6 +8,7 @@ import {
     findCaseStatus,
     generationSlotsAvailable,
 } from "@/cases_bundle/services/case_service";
+import { playTurn } from "@/cases_bundle/services/trial_service";
 import { dailyBudget, rateLimit } from "@/http/rate_limit";
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
@@ -118,6 +119,46 @@ casesRouter.post(
         }
     },
 );
+
+/**
+ * Pulls `path` out of an untrusted body without asserting anything about it.
+ * replayRun does the real validation; this only avoids reading a property off
+ * a null or a string.
+ */
+function pathFromBody(body: unknown): unknown {
+    if (typeof body !== "object" || body === null || !("path" in body)) {
+        return undefined;
+    }
+    return body.path;
+}
+
+/**
+ * One turn of the trial. No rate limiter: this spends no model budget, writes
+ * nothing, and the work is bounded by the node count, which is at most 24. The
+ * body is capped by express.json's 1mb limit in app.ts, and the path length by
+ * replayRun.
+ */
+casesRouter.post("/:id/turn", async (req, res) => {
+    const id = req.params.id;
+    if (!id || !UUID_PATTERN.test(id)) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    // A run is a live thing, unlike the case it is played against.
+    res.setHeader("Cache-Control", "no-store");
+
+    const outcome = await playTurn(id, pathFromBody(req.body));
+    if (outcome === "NOT_PLAYABLE") {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+    if (outcome === "INVALID_PATH") {
+        res.status(400).json({ error: "That is not a run of this trial." });
+        return;
+    }
+    res.json(outcome);
+});
 
 casesRouter.get("/:id", async (req, res) => {
     const id = req.params.id;

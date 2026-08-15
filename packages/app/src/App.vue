@@ -150,8 +150,23 @@ async function onFileChange(event: Event): Promise<void> {
                 </li>
             </ul>
 
-            <h3>Trial nodes</h3>
-            <p>{{ currentCase.nodes.length }} nodes, root {{ currentCase.rootNodeId }}</p>
+            <h3>Opening statement</h3>
+            <!-- Only the opening node ships now; the rest of the trial arrives
+                 a node at a time from POST /api/cases/:id/turn. -->
+            <p>
+                {{ currentCase.rootNode.speaker }}:
+                {{ currentCase.rootNode.statement }}
+            </p>
+            <ol>
+                <!-- Keyed by position because the index IS the identifier the
+                     api takes back: choices carry no id of their own. -->
+                <li
+                    v-for="(choice, index) in currentCase.rootNode.choices"
+                    :key="`${currentCase.rootNode.id}-${index}`"
+                >
+                    {{ choice.text }}
+                </li>
+            </ol>
         </section>
     </main>
 </template>

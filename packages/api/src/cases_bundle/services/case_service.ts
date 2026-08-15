@@ -1,4 +1,5 @@
 import type { CaseAccepted, CaseBible, CaseStatusResponse } from "@paw-order/shared";
+import { publicNode } from "@paw-order/shared";
 import type { GeneratedImage } from "@/ai/gemini";
 import { positiveIntEnv } from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
@@ -188,15 +189,38 @@ export async function findCaseStatus(id: string): Promise<CaseStatusResponse | n
         return { id: entity.id, status: entity.status };
     }
 
-    // Two things come off the bible here, not one. `truth` is the obvious
+    // Several things come off the bible here, not one. `truth` is the obvious
     // secret; `witnesses[].reliable` is the quiet one - it names which testimony
     // is false, which is the same answer by another route. imagePrompt goes too:
     // nothing renders it and it is a paragraph of model prose per exhibit.
-    const { truth: _truth, witnesses, evidence, ...rest } = entity.bible;
+    //
+    // The trial itself now leaves one node at a time: `nodes` carried the whole
+    // effects table and every edge, and `verdictRules` the number to farm
+    // towards. The player gets the opening node and posts back to /turn.
+    const {
+        truth: _truth,
+        witnesses,
+        evidence,
+        nodes,
+        rootNodeId,
+        verdictRules: _rules,
+        ...rest
+    } = entity.bible;
+
+    const rootNode = nodes.find((node) => node.id === rootNodeId);
+    if (!rootNode) {
+        // Unreachable for a stored bible: validateTree rejects a rootNodeId that
+        // is not a node. Answering "no case" beats serving a courtroom with no
+        // opening statement, and beats a non-null assertion.
+        console.error(`[paw-order-api] case ${entity.id} is READY with no root node`);
+        return null;
+    }
+
     return {
         status: "READY",
         id: entity.id,
         ...rest,
+        rootNode: publicNode(rootNode),
         evidence: evidence.map(({ imagePrompt: _prompt, ...exhibit }) => exhibit),
         witnesses: witnesses.map(({ reliable: _reliable, ...witness }) => witness),
     };

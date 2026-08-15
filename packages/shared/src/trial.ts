@@ -10,7 +10,14 @@
  * still render a score from the same code.
  */
 
-import type { GameEffects, GameState, TrialNode, Verdict, VerdictRules } from "./case.js";
+import type {
+    GameEffects,
+    GameState,
+    PublicTrialNode,
+    TrialNode,
+    Verdict,
+    VerdictRules,
+} from "./case.js";
 
 export interface TrialTurn {
     state: GameState;
@@ -92,6 +99,22 @@ export function takeChoice(
         return null;
     }
     return { state: applyEffects(state, choice.effects), nextNodeId: choice.nextNodeId };
+}
+
+/**
+ * Strips a node down to what the courtroom may see. Every field is listed by
+ * hand rather than spread-and-delete: a spread would carry any field added to
+ * TrialNode later straight onto the wire, and the whole point of this function
+ * is that adding one has to be a deliberate act.
+ */
+export function publicNode(node: TrialNode): PublicTrialNode {
+    return {
+        id: node.id,
+        speaker: node.speaker,
+        statement: node.statement,
+        evidenceIds: node.evidenceIds,
+        choices: node.choices.map((choice) => ({ text: choice.text })),
+    };
 }
 
 function reasonableDoubtAt(rules: VerdictRules): number {

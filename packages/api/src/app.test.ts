@@ -79,8 +79,12 @@ describe("api wiring", () => {
         expect(fetched.body.status).toBe("READY");
         expect(fetched.body.id).toBe(created.body.id);
         expect(fetched.body.truth).toBeUndefined();
-        expect(fetched.body.nodes.length).toBeGreaterThan(0);
-        expect(fetched.body.rootNodeId).toBeTruthy();
+        // The whole tree no longer ships: only the node the player is on. The
+        // rest arrives one turn at a time from POST /:id/turn.
+        expect(fetched.body.rootNode.id).toBeTruthy();
+        expect(fetched.body.rootNode.choices.length).toBeGreaterThan(0);
+        expect(fetched.body.nodes).toBeUndefined();
+        expect(fetched.body.rootNodeId).toBeUndefined();
         expect(fetched.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
         // Tests must never write to the real bucket, whatever packages/api/.env holds.
         expect(fetched.body.defendant.photoUrl).toContain("data:image/png");
@@ -105,6 +109,30 @@ describe("api wiring", () => {
         for (const exhibit of ready.body.evidence) {
             expect(exhibit.visualFacts.length).toBeGreaterThan(0);
             expect(exhibit.imagePrompt).toBeUndefined();
+        }
+    });
+
+    // The reason this endpoint shape exists. effects is the doubt/credibility/
+    // suspicion table: with it on the wire a player sorts by effects.doubt and
+    // walks the optimal path without reading a word (gamedesign.md section 7),
+    // and nextNodeId hands them the map to do it with. Asserting on the
+    // serialized body rather than named fields is deliberate - it fails wherever
+    // in the payload a regression reintroduces them.
+    it("never ships the effects table, the tree edges or the thresholds", async () => {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+
+        const ready = await pollUntilReady(created.body.id);
+        const wire = JSON.stringify(ready.body);
+        expect(wire).not.toContain("effects");
+        expect(wire).not.toContain("nextNodeId");
+        expect(wire).not.toContain("acquitAtDoubt");
+        expect(wire).not.toContain("suspiciousAtSuspicion");
+        expect(ready.body.verdictRules).toBeUndefined();
+        for (const choice of ready.body.rootNode.choices) {
+            expect(choice.text).toBeTruthy();
+            expect(Object.keys(choice)).toEqual(["text"]);
         }
     });
 
@@ -163,6 +191,136 @@ describe("api wiring", () => {
     it("404s a malformed case id instead of erroring", async () => {
         const response = await request(app).get("/api/cases/not-a-uuid");
         expect(response.status).toBe(404);
+    });
+});
+
+/**
+ * The trial itself. State is never accepted from the client: the run is the
+ * list of choice indexes taken so far, replayed server-side from the root every
+ * turn, so there is nothing to forge. The fixture tree is the one being played
+ * here - N1 choice 1 asks about the photograph and reveals the clock (E3).
+ */
+describe("trial turns", () => {
+    async function readyCase(): Promise<string> {
+        const created = await request(app)
+            .post("/api/cases")
+            .attach("photo", PNG_1X1, { filename: "dog.png", contentType: "image/png" });
+        await pollUntilReady(created.body.id);
+        const id: string = created.body.id;
+        return id;
+    }
+
+    it("answers an empty path with the opening node", async () => {
+        const id = await readyCase();
+        const turn = await request(app).post(`/api/cases/${id}/turn`).send({ path: [] });
+
+        expect(turn.status).toBe(200);
+        expect(turn.body.status).toBe("NODE");
+        expect(turn.body.node.id).toBe("N1");
+        expect(turn.body.revealedEvidenceIds).toEqual([]);
+        expect(turn.headers["cache-control"]).toBe("no-store");
+    });
+
+    it("advances a turn and reports what the choice revealed", async () => {
+        const id = await readyCase();
+        const turn = await request(app)
+            .post(`/api/cases/${id}/turn`)
+            .send({ path: [1] });
+
+        expect(turn.status).toBe(200);
+        expect(turn.body.status).toBe("NODE");
+        expect(turn.body.node.id).toBe("N3");
+        expect(turn.body.node.statement).toBeTruthy();
+        expect(turn.body.revealedEvidenceIds).toEqual(["E3"]);
+        // Mid-trial the player sees the courtroom, not the scoreboard.
+        expect(turn.body.verdict).toBeUndefined();
+        expect(turn.body.score).toBeUndefined();
+        expect(turn.body.truth).toBeUndefined();
+        expect(turn.body.doubt).toBeUndefined();
+    });
+
+    it("ends the run with a verdict, a score and the truth", async () => {
+        const id = await readyCase();
+        // The doubt-maximal run: 55 of 55 doubt, 20 of 30 credibility.
+        const turn = await request(app)
+            .post(`/api/cases/${id}/turn`)
+            .send({ path: [1, 0, 0, 1] });
+
+        expect(turn.status).toBe(200);
+        expect(turn.body.status).toBe("VERDICT");
+        // 55 doubt against an acquitAtDoubt of 60: the fixture cannot be won,
+        // and still scores 95 for taking every point it offers.
+        expect(turn.body.verdict).toBe("GUILTY_BUT_REASONABLE_DOUBT");
+        expect(turn.body.score).toBe(95);
+        expect(turn.body.truth.summary).toBeTruthy();
+        expect(turn.body.node).toBeUndefined();
+    });
+
+    it("scores a short concession well below a fought run", async () => {
+        const id = await readyCase();
+        const turn = await request(app)
+            .post(`/api/cases/${id}/turn`)
+            .send({ path: [1, 1] });
+
+        expect(turn.body.status).toBe("VERDICT");
+        expect(turn.body.verdict).toBe("GUILTY");
+        expect(turn.body.score).toBe(20);
+    });
+
+    it("keeps the effects table off the wire mid-trial too", async () => {
+        const id = await readyCase();
+        const turn = await request(app)
+            .post(`/api/cases/${id}/turn`)
+            .send({ path: [1] });
+
+        const wire = JSON.stringify(turn.body);
+        expect(wire).not.toContain("effects");
+        expect(wire).not.toContain("nextNodeId");
+        for (const choice of turn.body.node.choices) {
+            expect(Object.keys(choice)).toEqual(["text"]);
+        }
+    });
+
+    // Every one of these is a body an anonymous caller can post.
+    it("rejects a path that does not resolve", async () => {
+        const id = await readyCase();
+        for (const path of [
+            [9],
+            [1, 1, 0],
+            [-1],
+            [1.5],
+            ["length"],
+            ["0"],
+            [null],
+            [{}],
+            Array.from({ length: 100 }, () => 0),
+        ]) {
+            const turn = await request(app).post(`/api/cases/${id}/turn`).send({ path });
+            expect(turn.status).toBe(400);
+        }
+    });
+
+    it("rejects a body whose path is not an array", async () => {
+        const id = await readyCase();
+        for (const body of [{}, { path: "1" }, { path: 1 }, { path: null }]) {
+            const turn = await request(app).post(`/api/cases/${id}/turn`).send(body);
+            expect(turn.status).toBe(400);
+        }
+    });
+
+    it("404s a turn against a case that is not playable", async () => {
+        const unknown = await request(app)
+            .post("/api/cases/2f1a2b3c-0000-4000-8000-000000000000/turn")
+            .send({ path: [] });
+        expect(unknown.status).toBe(404);
+
+        const malformed = await request(app).post("/api/cases/not-a-uuid/turn").send({ path: [] });
+        expect(malformed.status).toBe(404);
+
+        const id = await readyCase();
+        await AppDataSource.getRepository(CaseEntity).update(id, { status: "FAILED" });
+        const failed = await request(app).post(`/api/cases/${id}/turn`).send({ path: [] });
+        expect(failed.status).toBe(404);
     });
 });
 
