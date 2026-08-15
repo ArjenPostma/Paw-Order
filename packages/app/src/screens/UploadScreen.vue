@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onBeforeUnmount, ref } from "vue";
 import type { PlayedCase } from "@/history";
 import { downscale } from "@/image";
 
@@ -25,12 +25,20 @@ const dragging = ref(false);
 const rejected = ref<string | null>(null);
 
 /**
+ * The chosen photo, waiting on the player to confirm it. Held here rather than
+ * sent straight up: a generation is one of a very small daily allowance and a
+ * minute of waiting, and the wrong photo dropped by accident used to spend both
+ * before the player saw what they had picked.
+ */
+const pending = ref<{ file: File; url: string } | null>(null);
+
+/**
  * The one filter both entry points share. `accept="image/*"` constrains the
  * picker's default view and nothing else - a drop bypasses it entirely, and the
  * picker itself lets a determined user switch to "All Files" - so neither path
  * can be trusted to have filtered anything.
  */
-async function take(file: File | undefined): Promise<void> {
+function take(file: File | undefined): void {
     if (!file) {
         return;
     }
@@ -43,9 +51,31 @@ async function take(file: File | undefined): Promise<void> {
         return;
     }
     rejected.value = null;
-    // Checked before the resize, not after: the limits above are the api's, and
-    // what the api sees is only ever smaller than what was picked here.
-    emit("photo", await downscale(file), name.value.trim());
+    // The preview is of what was picked, not of what will be sent: the resize
+    // waits for the confirm, so swapping photos costs no work.
+    replacePending({ file, url: URL.createObjectURL(file) });
+}
+
+/** One place to swap the held photo, so its object URL is always revoked. */
+function replacePending(next: { file: File; url: string } | null): void {
+    if (pending.value) {
+        URL.revokeObjectURL(pending.value.url);
+    }
+    pending.value = next;
+}
+
+onBeforeUnmount(() => {
+    replacePending(null);
+});
+
+async function book(): Promise<void> {
+    const held = pending.value;
+    if (!held) {
+        return;
+    }
+    // Resized here rather than at pick time: the checks in take() are against
+    // the api's own limits, and what the api sees is only ever smaller.
+    emit("photo", await downscale(held.file), name.value.trim());
 }
 
 function onFileChange(event: Event): void {
@@ -58,7 +88,7 @@ function onFileChange(event: Event): void {
     // change event, so the obvious response to "try another photo" - try the
     // same one again, since the failure is usually transient - does nothing.
     input.value = "";
-    void take(file);
+    take(file);
 }
 
 /**
@@ -78,7 +108,7 @@ function onDragLeave(event: DragEvent): void {
 
 function onDrop(event: DragEvent): void {
     dragging.value = false;
-    void take(event.dataTransfer?.files[0]);
+    take(event.dataTransfer?.files[0]);
 }
 </script>
 
@@ -101,6 +131,7 @@ function onDrop(event: DragEvent): void {
                 v-model="name"
                 class="named__input"
                 type="text"
+                placeholder="Who's the good boy?"
                 :maxlength="MAX_NAME_LENGTH"
                 autocomplete="off"
             />
@@ -117,11 +148,25 @@ function onDrop(event: DragEvent): void {
         >
             <input class="envelope__input" type="file" accept="image/*" @change="onFileChange" />
             <span class="field-label">Exhibit A &middot; the defendant</span>
-            <span class="envelope__action">Choose a dog photo</span>
+            <!-- The preview IS the picker: the zone keeps every one of its
+                 targets, so a wrong photo is swapped by clicking or dropping
+                 again, with no second control to reach for. -->
+            <img v-if="pending" class="envelope__preview" :src="pending.url" alt="" />
+            <span class="envelope__action">
+                {{ pending ? "Not this dog?" : "Choose a dog photo" }}
+            </span>
             <span class="envelope__hint">
-                or drop one here &middot; JPG, PNG or WebP, up to 8MB
+                {{
+                    pending
+                        ? "Click or drop another photo to swap"
+                        : "or drop one here · JPG, PNG or WebP, up to 8MB"
+                }}
             </span>
         </label>
+
+        <!-- Outside the label, like the name field and for the same reason: a
+             button inside it would open the file picker instead of booking. -->
+        <button v-if="pending" class="book" type="button" @click="book">Enter court</button>
 
         <p v-if="rejected || error" class="upload__error" role="alert">
             {{ rejected ?? error }}
@@ -244,6 +289,11 @@ function onDrop(event: DragEvent): void {
     font-size: 1rem;
 }
 
+/* The browser default is a flat grey that reads as a disabled field on manila. */
+.named__input::placeholder {
+    color: var(--ink-soft);
+}
+
 .named__input:focus-visible {
     outline: 3px solid var(--stamp);
     outline-offset: 2px;
@@ -264,18 +314,6 @@ function onDrop(event: DragEvent): void {
         background 150ms ease,
         border-color 150ms ease,
         transform 150ms ease;
-}
-
-/* The envelope flap: two triangles meeting at the top edge. */
-.envelope::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto;
-    height: 3.5rem;
-    background:
-        linear-gradient(to bottom right, transparent 49.5%, rgb(23 28 38 / 8%) 50%),
-        linear-gradient(to bottom left, transparent 49.5%, rgb(23 28 38 / 8%) 50%);
-    pointer-events: none;
 }
 
 .envelope:hover,
@@ -310,6 +348,40 @@ function onDrop(event: DragEvent): void {
     font-family: var(--transcript);
     font-size: 0.8125rem;
     color: var(--ink-soft);
+}
+
+/* Square and cropped, the way the mugshot on the arrest sheet is: this is the
+   first look at what the file will hold. */
+.envelope__preview {
+    width: 12rem;
+    height: 12rem;
+    object-fit: cover;
+    border: var(--rule);
+    background: var(--paper);
+}
+
+/* The verdict screen's primary action, in the one other place a click costs a
+   generation. */
+.book {
+    width: min(30rem, 100%);
+    padding: 0.9rem 1rem;
+    background: var(--ink);
+    color: var(--paper);
+    border: 2px solid var(--ink);
+    font-family: var(--display);
+    font-size: 0.9375rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    transition:
+        background 150ms ease,
+        border-color 150ms ease,
+        transform 150ms ease;
+}
+
+.book:hover {
+    background: var(--stamp);
+    border-color: var(--stamp);
+    transform: translateY(-2px);
 }
 
 .upload__error {

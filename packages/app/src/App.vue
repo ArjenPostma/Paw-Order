@@ -23,10 +23,25 @@ const POLL_ATTEMPTS = 90;
 // the edge or a moment offline is expected, not exceptional. Giving up on the
 // first one throws away a case that is generating perfectly well.
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
+/**
+ * Both ways the wait can end with no case: the api reported FAILED, or the
+ * generation never came back inside POLL_ATTEMPTS. The player is told the same
+ * thing either way - from where they sit the two are one outcome.
+ */
+const NO_CASE_MESSAGE = "Not enough evidence to bring a case. Try another photo.";
 
 const currentCase = ref<PublicCase | null>(null);
 const error = ref<string | null>(null);
 const preparing = ref(false);
+/**
+ * Set when the wait ended without a case: the generation failed, or it never
+ * came back inside POLL_ATTEMPTS. The message stays on the preparing screen
+ * rather than dropping the player back at the envelope, because they have been
+ * watching that panel for three minutes and it is the panel that owes them an
+ * answer. Errors thrown before generation starts - a refused upload, a rate
+ * limit - still belong on the upload screen, where the retry is.
+ */
+const stalled = ref<string | null>(null);
 
 /**
  * The run. `path` is the whole list of choice indexes taken so far: the api
@@ -163,6 +178,7 @@ function takeAnotherCase(): void {
     exhibits.value = [];
     error.value = null;
     preparing.value = false;
+    stalled.value = null;
 }
 
 async function choose(index: number): Promise<void> {
@@ -217,6 +233,7 @@ async function onPhoto(file: File, name: string): Promise<void> {
     const thisRun = run;
     preparing.value = true;
     error.value = null;
+    stalled.value = null;
     currentCase.value = null;
     entered.value = false;
 
@@ -249,10 +266,11 @@ async function onPhoto(file: File, name: string): Promise<void> {
                 return;
             }
             if (result.status === "FAILED") {
-                throw new Error("The case fell apart during generation. Try another photo.");
+                stalled.value = NO_CASE_MESSAGE;
+                return;
             }
         }
-        throw new Error("Preparing the case took too long. Try another photo.");
+        stalled.value = NO_CASE_MESSAGE;
     } catch (cause) {
         if (thisRun !== run) {
             return;
@@ -273,7 +291,11 @@ async function onPhoto(file: File, name: string): Promise<void> {
         @replay="onReplay"
     />
 
-    <PreparingScreen v-else-if="screen === 'preparing'" />
+    <PreparingScreen
+        v-else-if="screen === 'preparing'"
+        :stalled="stalled"
+        @leave="takeAnotherCase"
+    />
 
     <ArrestScreen
         v-else-if="screen === 'arrest' && currentCase"
