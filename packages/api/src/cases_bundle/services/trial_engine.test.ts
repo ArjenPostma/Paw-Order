@@ -88,6 +88,19 @@ describe("takeChoice", () => {
         expect(takeChoice(nodes, initialState(), "N1", 2)).toBeNull();
         expect(takeChoice(nodes, initialState(), "N1", -1)).toBeNull();
         expect(takeChoice(nodes, initialState(), "N1", 1.5)).toBeNull();
+        expect(takeChoice(nodes, initialState(), "N1", Number.NaN)).toBeNull();
+    });
+
+    it("refuses a choice index that is not a number at all", () => {
+        // The index arrives from a json body, so it can be any type. Indexing
+        // the array is not on its own a bounds check: choices["length"] is the
+        // array length, which is truthy, and the turn would then read .effects
+        // off a number and throw rather than returning null.
+        expect(takeChoice(nodes, initialState(), "N1", "length")).toBeNull();
+        expect(takeChoice(nodes, initialState(), "N1", "0")).toBeNull();
+        expect(takeChoice(nodes, initialState(), "N1", "constructor")).toBeNull();
+        expect(takeChoice(nodes, initialState(), "N1", null)).toBeNull();
+        expect(takeChoice(nodes, initialState(), "N1", { valueOf: () => 0 })).toBeNull();
     });
 });
 

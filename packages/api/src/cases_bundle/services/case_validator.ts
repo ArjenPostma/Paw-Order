@@ -452,11 +452,16 @@ export function validateTree(
     // is not, because then no choice decides anything. Checked here rather than
     // repaired, for the same reason unreachable nodes are: a clamped threshold
     // is a quietly different game than the one the model designed.
-    if (verdictRules.acquitAtDoubt > 0) {
+    // Only once the graph itself is sound. pathBounds scores a dangling edge as
+    // an ending, so on a broken tree the span it reports is fiction, and the
+    // whole error list goes back as retry instructions - a phantom "your
+    // thresholds are wrong" line spends the one remaining attempt on a repair
+    // that was never needed. A tree with structural errors is rejected anyway.
+    if (check.errors.length === 0 && verdictRules.acquitAtDoubt > 0) {
         const bounds = pathBounds(nodes, rootNodeId);
         if (!verdictCanVary(bounds, verdictRules)) {
             check.errors.push(
-                `tree.verdictRules put every run on the same verdict: doubt spans ${String(bounds.minDoubt)} to ${String(bounds.maxDoubt)} against an acquitAtDoubt of ${String(verdictRules.acquitAtDoubt)}`,
+                `tree.verdictRules put every run on the same doubt verdict: doubt spans ${String(bounds.minDoubt)} to ${String(bounds.maxDoubt)} against an acquitAtDoubt of ${String(verdictRules.acquitAtDoubt)}`,
             );
         }
     }

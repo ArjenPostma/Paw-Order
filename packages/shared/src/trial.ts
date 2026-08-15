@@ -71,13 +71,22 @@ export function takeChoice(
     nodes: TrialNode[],
     state: GameState,
     nodeId: string,
-    choiceIndex: number,
+    choiceIndex: unknown,
 ): TrialTurn | null {
     const node = nodes.find((candidate) => candidate.id === nodeId);
     if (!node) {
         return null;
     }
-    // Covers negative, fractional and out-of-range indexes in one lookup.
+    // `unknown`, because the index arrives from a json body and a declared
+    // `number` is not a runtime check. Indexing the array is not a bounds check
+    // on its own either: choices["length"] is the array length, truthy enough
+    // to pass the guard below, and applyEffects would then read .effects off a
+    // number and throw where the contract promises null. The typeof narrows;
+    // isInteger rejects NaN and fractions; the lookup covers negative and
+    // out-of-range.
+    if (typeof choiceIndex !== "number" || !Number.isInteger(choiceIndex)) {
+        return null;
+    }
     const choice = node.choices[choiceIndex];
     if (!choice) {
         return null;
@@ -163,9 +172,16 @@ export function pathBounds(nodes: TrialNode[], rootNodeId: string): PathBounds {
  * hidden truths where the dog did it, and 10 sanctions losing the case with a
  * high defense score, so a tree whose best run falls short of acquittal is a
  * legitimate hard case. What is not legitimate is a tree where every run lands
- * on the same verdict: then the choices are decoration and the trial is a
- * cutscene. That happens in both directions - a threshold above anything the
- * tree can reach, and one below everything it can reach.
+ * on the same side of both doubt lines: then the choices are decoration and the
+ * trial is a cutscene. That happens in both directions - a threshold above
+ * anything the tree can reach, and one below everything it can reach.
+ *
+ * Only the doubt axis is judged. Suspicion splits an acquittal into clean and
+ * tainted, so a tree whose runs all acquit and differ only in suspicion does
+ * vary its verdict and is still rejected here. That is deliberate: reaching
+ * acquitAtDoubt on every path means every choice was strongly doubt-positive,
+ * which the tree prompt already forbids. The error message says doubt verdict,
+ * not verdict, so it does not claim more than this checks.
  */
 export function verdictCanVary(bounds: PathBounds, rules: VerdictRules): boolean {
     return [rules.acquitAtDoubt, reasonableDoubtAt(rules)].some(
@@ -182,9 +198,14 @@ function ratio(value: number, best: number): number {
 
 /**
  * 0-100, measured against what this tree makes possible rather than an absolute
- * scale. A case the player cannot win still scores 100 for a run that took
- * every point on offer, which is what lets a loss read as an excellent defense
+ * scale, which is what lets a loss read as an excellent defense
  * (gamedesign.md 10).
+ *
+ * The ceiling is tree-dependent and usually below 100: doubt and credibility
+ * are normalised against their own best runs, and those are rarely the same
+ * run. On the fixture the doubt-maximal run scores 95 and the
+ * credibility-maximal one 92. Winning the case and arguing it best are
+ * deliberately separate achievements.
  */
 export function scoreDefense(state: GameState, nodes: TrialNode[], rootNodeId: string): number {
     const bounds = pathBounds(nodes, rootNodeId);

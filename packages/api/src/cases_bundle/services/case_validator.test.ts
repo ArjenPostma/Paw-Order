@@ -249,7 +249,7 @@ describe("validateTree", () => {
             evidence,
         );
         expect(result.ok).toBe(false);
-        expect(errorsOf(result)).toContain("same verdict");
+        expect(errorsOf(result)).toContain("same doubt verdict");
     });
 
     it("rejects a tree that acquits whatever the player does", () => {
@@ -260,7 +260,31 @@ describe("validateTree", () => {
             evidence,
         );
         expect(result.ok).toBe(false);
-        expect(errorsOf(result)).toContain("same verdict");
+        expect(errorsOf(result)).toContain("same doubt verdict");
+    });
+
+    it("does not blame verdictRules for a graph that is already broken", () => {
+        // Both of the root's choices dangle, so the reachable span collapses to
+        // 5-10 and the variance check would fire on top of the real errors. The
+        // whole error list is fed back as retry instructions, so a phantom
+        // "fix your thresholds" line spends the one remaining attempt on a
+        // repair that was never needed.
+        const result = validateTree(
+            brokenTree((tree) => {
+                const root = tree.nodes[0];
+                expect(root).toBeDefined();
+                for (const choice of root?.choices ?? []) {
+                    choice.nextNodeId = "N42";
+                }
+            }),
+            evidence,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("unknown node");
+        // "doubt spans" rather than the headline wording: it appears in the
+        // variance error whatever that sentence is phrased as, so this stays a
+        // real anchor if the message is ever reworded.
+        expect(errorsOf(result)).not.toContain("doubt spans");
     });
 
     it("does not walk a cyclic tree forever while collecting its errors", () => {
