@@ -16,7 +16,8 @@ async function main(): Promise<void> {
     await AppDataSource.initialize();
 
     const { createApp } = await import("@/app");
-    const { sweepStalePendingCases } = await import("@/cases_bundle/services/case_service");
+    const { startCaseRetention, sweepStalePendingCases } =
+        await import("@/cases_bundle/services/case_service");
 
     const server = createApp().listen(PORT, () => {
         console.log(`[paw-order-api] listening on http://localhost:${PORT}`);
@@ -34,6 +35,9 @@ async function main(): Promise<void> {
     // touches can be a row this process created, so it is safe to run while
     // requests are already being served.
     sweepStalePendingCases();
+    // Same reasoning, and the same full scan: retention only ever touches rows
+    // older than a year, so nothing this process is serving is in its way.
+    startCaseRetention();
 }
 
 main().catch((error: unknown) => {

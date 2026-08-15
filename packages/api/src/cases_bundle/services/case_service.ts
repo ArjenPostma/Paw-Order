@@ -20,6 +20,17 @@ const MAX_CONCURRENT = positiveIntEnv("GENERATION_MAX_CONCURRENT", 3);
  * concurrency slot with it, so every generation gets a deadline.
  */
 const TIMEOUT_MS = positiveIntEnv("GENERATION_TIMEOUT_MS", 120_000);
+/**
+ * How long a case stays playable before it is deleted, row and all.
+ *
+ * Must stay SHORTER than the R2 lifecycle rule that expires `dogs/` and
+ * `evidence/` (DEPLOY.md). The objects are referenced only by url from inside
+ * the bible, so nothing here deletes them; if they expired first, a surviving
+ * row would serve a trial whose mugshot and every exhibit 404.
+ */
+const RETENTION_MS = positiveIntEnv("CASE_RETENTION_DAYS", 365) * 24 * 60 * 60 * 1000;
+/** How often the retention sweep runs. A container can outlive many windows. */
+const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 let inFlight = 0;
 
@@ -218,6 +229,49 @@ export function sweepStalePendingCases(): void {
     run();
     // unref: a pending sweep must never be the reason the process stays up.
     setTimeout(run, TIMEOUT_MS).unref();
+}
+
+/**
+ * Deletes cases past the retention window. Every status goes: a year-old FAILED
+ * row is as dead as a year-old READY one, and nothing reuses either.
+ *
+ * The paired R2 objects are not touched here - the bucket's own lifecycle rule
+ * expires them on a longer window, which also reaps the objects no row ever
+ * referenced (a crash between upload and insert). Deleting them from here would
+ * mean parsing keys back out of urls stored in the bible and would still miss
+ * those.
+ *
+ * ponytail: full scan, nothing indexes createdAt. Once a day against a table one
+ * anonymous game fills is not worth a migration; add the index when the scan
+ * shows up in query timings.
+ */
+export async function deleteExpiredCases(): Promise<number> {
+    const { affected } = await repository().delete({
+        // Stored as TIMESTAMP without time zone by a writer running UTC, and
+        // this Date is UTC too (see case_entity.ts).
+        createdAt: LessThan(new Date(Date.now() - RETENTION_MS)),
+    });
+    return affected ?? 0;
+}
+
+/** Deletes expired cases at boot and once a day after. */
+export function startCaseRetention(): void {
+    const run = (): void => {
+        deleteExpiredCases()
+            .then((deleted) => {
+                if (deleted > 0) {
+                    console.log(`[paw-order-api] deleted ${String(deleted)} expired case(s)`);
+                }
+            })
+            .catch((error: unknown) => {
+                // Housekeeping. Losing a pass costs a day of storage; an
+                // unhandled rejection costs the process.
+                console.error("[paw-order-api] could not delete expired cases", error);
+            });
+    };
+    run();
+    // unref: retention must never be the reason the process stays up.
+    setInterval(run, RETENTION_INTERVAL_MS).unref();
 }
 
 /**

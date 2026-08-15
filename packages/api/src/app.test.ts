@@ -10,7 +10,11 @@ import {
 } from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
 import { CaseEntity } from "@/cases_bundle/models/case_entity";
-import { failStalePendingCases, generationSlotsInUse } from "@/cases_bundle/services/case_service";
+import {
+    deleteExpiredCases,
+    failStalePendingCases,
+    generationSlotsInUse,
+} from "@/cases_bundle/services/case_service";
 
 // Smallest valid PNG (1x1, transparent).
 const PNG_1X1 = Buffer.from(
@@ -225,6 +229,34 @@ describe("api wiring", () => {
         expect(await failStalePendingCases()).toBeGreaterThanOrEqual(1);
         expect((await repository.findOneByOrFail({ id: stale.body.id })).status).toBe("FAILED");
         expect((await repository.findOneByOrFail({ id: fresh.body.id })).status).toBe("PENDING");
+    });
+
+    // Retention deletes the row; the bucket's lifecycle rule deletes the images
+    // on a longer window (DEPLOY.md). The window is what this guards: widen the
+    // filter and a case a player is still holding a link to vanishes.
+    it("deletes cases past the retention window and leaves fresh ones alone", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const expired = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+        const fresh = await request(app)
+            .post("/api/cases")
+            .field("name", "Biscuit")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+        await pollUntilReady(expired.body.id);
+        await pollUntilReady(fresh.body.id);
+
+        const retentionMs = positiveIntEnv("CASE_RETENTION_DAYS", 365) * 24 * 60 * 60 * 1000;
+        await repository.update(expired.body.id, {
+            createdAt: new Date(Date.now() - retentionMs - 1),
+        });
+
+        // Not an exact count: every other test in this file leaves rows in the
+        // shared in-memory database, and any of them could be backdated too.
+        expect(await deleteExpiredCases()).toBeGreaterThanOrEqual(1);
+        expect(await repository.findOne({ where: { id: expired.body.id } })).toBeNull();
+        expect(await repository.findOne({ where: { id: fresh.body.id } })).not.toBeNull();
     });
 
     // The other half: a PENDING run that is still inside its deadline IS the

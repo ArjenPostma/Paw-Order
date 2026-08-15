@@ -12,8 +12,10 @@ import type { CaseBible, CaseStatus } from "@paw-order/shared";
  * over every row, not a type annotation - weigh that before a query needs to
  * reach inside.
  *
- * ponytail: no retention policy. Rows and their paired R2 objects grow with
- * every anonymous upload; the cleanup job and the index it needs land together.
+ * Retention is CASE_RETENTION_DAYS (365) in case_service.ts, paired with a
+ * longer R2 lifecycle rule on the objects (DEPLOY.md). The delete is a full
+ * scan on purpose: nothing indexes createdAt, and once a day is not worth a
+ * migration.
  */
 @Entity("cases")
 export class CaseEntity {
