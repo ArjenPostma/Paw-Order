@@ -1,11 +1,53 @@
 import { GoogleGenAI } from "@google/genai";
+import type { Content, Part, Schema } from "@google/genai";
 import { requireEnv } from "@/config/env";
 
-// Model ids live in env so a rename upstream is a redeploy, not a code change.
-// Nano Banana (the -image model) is the cheap tier and is the one that keeps a
-// reference photo's subject consistent across generated exhibits.
-const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL ?? "gemini-2.5-flash";
-const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-2.5-flash-image";
+// Model ids live in env so a rename upstream is a redeploy, not a code change -
+// which is what happened to the 2.5 defaults these replace: Google retired them
+// for new API keys, so every generation 404ed. Pinned rather than the moving
+// `gemini-flash-latest` alias, because a silent model swap changes how the
+// prompts behave and the validator is what pays for it.
+//
+// The -image model keeps a reference photo's subject consistent across generated
+// exhibits, which is the whole trick behind the evidence images. -lite is the
+// cheap tier, roughly half the per-image price of gemini-3.1-flash-image. If the
+// defendant stops looking like the uploaded dog, that likeness is worth more than
+// the saving: trade back up with GEMINI_IMAGE_MODEL rather than editing this.
+//
+// Both exported so a failure log can name the model that actually ran, rather
+// than whichever id the reader assumes is configured.
+export const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL ?? "gemini-3.7-flash";
+export const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-lite-image";
+/**
+ * Image size is the single biggest cost lever in the whole app: exhibits are
+ * three of the four paid calls per case. On the lite model above the tiers are
+ * roughly 1K $0.034, 2K $0.05, 4K $0.076 each (double those on
+ * gemini-3.1-flash-image). Pinned rather than left to the model's default,
+ * because that default is not ours to rely on. 1K is 1024px, far more than the
+ * exhibits are ever displayed at.
+ */
+const IMAGE_SIZES = ["1K", "2K", "4K"] as const;
+const IMAGE_SIZE = resolveImageSize();
+
+/**
+ * Allowlisted, because the field is typed `string` in the SDK: a lowercase
+ * "1k" or a "1024" typechecks, reaches the endpoint, and 400s every image call
+ * - which fails the whole case AFTER the text stage has already been billed.
+ * Same warn-and-fall-back shape as positiveIntEnv, for the same reason.
+ */
+function resolveImageSize(): string {
+    const raw = process.env.GEMINI_IMAGE_SIZE;
+    if (raw === undefined || raw === "") {
+        return "1K";
+    }
+    if (IMAGE_SIZES.some((size) => size === raw)) {
+        return raw;
+    }
+    console.warn(
+        `[paw-order-api] GEMINI_IMAGE_SIZE=${JSON.stringify(raw)} is not one of ${IMAGE_SIZES.join(", ")}, falling back to 1K`,
+    );
+    return "1K";
+}
 // ~12MB of base64, i.e. ~9MB of image. Well above any exhibit this game needs.
 const MAX_IMAGE_BASE64_CHARS = 12 * 1024 * 1024;
 
@@ -19,18 +61,65 @@ function getClient(): GoogleGenAI {
     return client;
 }
 
+export interface GeneratedImage {
+    bytes: Buffer;
+    mimeType: string;
+}
+
 /**
- * Generates JSON constrained to `responseSchema` (a Gemini response schema).
- * Returns the raw text; the caller validates it — a schema-constrained model is
- * still a network peer, not a guarantee.
+ * A photo already encoded for the wire. One generation sends the same reference
+ * photo to four calls, three of them concurrent, and `toString("base64")` on an
+ * 8MB buffer allocates ~10.7MB every time - so encoding per call held three
+ * independent copies of the same bytes alive at once. Encode once, pass this.
  */
-export async function generateJson(prompt: string, responseSchema: object): Promise<string> {
+export interface EncodedImage {
+    base64: string;
+    mimeType: string;
+}
+
+export function encodeImage(image: GeneratedImage): EncodedImage {
+    return { base64: image.bytes.toString("base64"), mimeType: image.mimeType };
+}
+
+/**
+ * One user turn, with the reference photo first when there is one. Order
+ * matters: the image has to precede the text that talks about it.
+ */
+function userContent(prompt: string, reference?: EncodedImage): Content[] {
+    const parts: Part[] = [];
+    if (reference) {
+        parts.push({
+            inlineData: { mimeType: reference.mimeType, data: reference.base64 },
+        });
+    }
+    parts.push({ text: prompt });
+    return [{ role: "user", parts }];
+}
+
+export interface GenerateOptions {
+    /** The player's dog photo, when the model needs to see it. */
+    reference?: EncodedImage;
+    /** Aborts a hung call. Note: billing still applies to whatever ran. */
+    signal?: AbortSignal;
+}
+
+/**
+ * Generates JSON constrained to `responseSchema`. Returns the raw text; the
+ * caller validates it — a schema-constrained model is still a network peer,
+ * not a guarantee.
+ */
+export async function generateJson(
+    prompt: string,
+    responseSchema: Schema,
+    options: GenerateOptions = {},
+): Promise<string> {
     const response = await getClient().models.generateContent({
         model: TEXT_MODEL,
-        contents: prompt,
+        contents: userContent(prompt, options.reference),
         config: {
             responseMimeType: "application/json",
             responseSchema,
+            abortSignal: options.signal,
         },
     });
 
@@ -41,44 +130,32 @@ export async function generateJson(prompt: string, responseSchema: object): Prom
     return text;
 }
 
-export interface GeneratedImage {
-    bytes: Buffer;
-    mimeType: string;
-}
-
 /**
  * Generates one evidence image. `reference` is the player's dog photo, passed
  * inline so the same dog appears in every exhibit (gamedesign.md §5).
  */
 export async function generateImage(
     prompt: string,
-    reference: GeneratedImage,
+    reference: EncodedImage,
+    signal?: AbortSignal,
 ): Promise<GeneratedImage> {
     const response = await getClient().models.generateContent({
         model: IMAGE_MODEL,
-        contents: [
-            {
-                role: "user",
-                parts: [
-                    {
-                        inlineData: {
-                            mimeType: reference.mimeType,
-                            data: reference.bytes.toString("base64"),
-                        },
-                    },
-                    { text: prompt },
-                ],
-            },
-        ],
-        config: { responseModalities: ["IMAGE"] },
+        contents: userContent(prompt, reference),
+        config: {
+            responseModalities: ["IMAGE"],
+            imageConfig: { imageSize: IMAGE_SIZE },
+            abortSignal: signal,
+        },
     });
 
     for (const part of response.candidates?.[0]?.content?.parts ?? []) {
         const data = part.inlineData?.data;
         if (data) {
-            // Response size is the peer's choice, so bound it before allocating:
-            // a malfunctioning upstream returning a 200MB part would otherwise be
-            // buffered whole, once per exhibit.
+            // Bounds the Buffer.from allocation only. The SDK has already
+            // received and JSON-parsed the whole response by this point, so a
+            // 200MB part is in memory either way - this stops it being decoded
+            // into a second, larger copy. A real bound belongs at the transport.
             if (data.length > MAX_IMAGE_BASE64_CHARS) {
                 throw new Error("Gemini returned an image larger than the allowed size");
             }

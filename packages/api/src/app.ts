@@ -21,8 +21,13 @@ export function createApp(): Express {
     // Behind Railway's edge in prod, so req.ip must come from X-Forwarded-For.
     // Gated on TRUST_PROXY=true (set on Railway); unset in dev leaves Express's
     // default so req.ip is the local socket.
+    //
+    // 1, not true: `true` trusts the whole X-Forwarded-For chain and resolves
+    // req.ip to its LEFTMOST entry, which the client writes. The per-ip rate
+    // limit keys on req.ip, so any caller could mint a fresh bucket per request
+    // and the cap would never fire. One hop is what Railway's edge actually adds.
     if (process.env.TRUST_PROXY === "true") {
-        app.set("trust proxy", true);
+        app.set("trust proxy", 1);
     }
 
     app.get("/health", (_req, res) => {

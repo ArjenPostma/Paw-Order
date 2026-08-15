@@ -48,6 +48,7 @@ export async function uploadImage(
     bytes: Buffer,
     contentType: string,
     prefix: string,
+    signal?: AbortSignal,
 ): Promise<StoredImage> {
     const extension = STORABLE_TYPES.get(contentType);
     if (!extension) {
@@ -67,6 +68,10 @@ export async function uploadImage(
     }
 
     const key = `${prefix}/${randomUUID()}.${extension}`;
+    // The signal matters more than it looks: the S3 client resolves to no
+    // request, connection or socket timeout at all, so without it a half-open
+    // connection to R2 is bounded only by OS keepalive - minutes during which
+    // the generation never settles and its concurrency slot is never released.
     await getClient().send(
         new PutObjectCommand({
             Bucket: requireEnv("R2_BUCKET"),
@@ -74,6 +79,7 @@ export async function uploadImage(
             Body: bytes,
             ContentType: contentType,
         }),
+        { abortSignal: signal },
     );
 
     return { url: `${requireEnv("R2_PUBLIC_URL").replace(/\/+$/, "")}/${key}`, key };

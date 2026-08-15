@@ -1,4 +1,4 @@
-import type { PublicCase } from "@paw-order/shared";
+import type { CaseAccepted, CaseStatusResponse } from "@paw-order/shared";
 
 // VITE_API_URL is build-time: empty in dev (the Vite proxy makes /api
 // same-origin), the Railway api origin in the Cloudflare Pages build.
@@ -23,16 +23,17 @@ async function readJson(response: Response): Promise<unknown> {
     return response.json();
 }
 
-export async function createCase(photo: File): Promise<PublicCase> {
+/** Returns as soon as the case has an id. The case itself is still generating. */
+export async function createCase(photo: File): Promise<CaseAccepted> {
     const body = new FormData();
     body.append("photo", photo);
     const response = await fetch(apiUrl("/api/cases"), { method: "POST", body });
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
-    return (await readJson(response)) as PublicCase;
+    return (await readJson(response)) as CaseAccepted;
 }
 
-export async function fetchCase(id: string): Promise<PublicCase> {
+export async function fetchCase(id: string): Promise<CaseStatusResponse> {
     const response = await fetch(apiUrl(`/api/cases/${id}`));
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
-    return (await readJson(response)) as PublicCase;
+    return (await readJson(response)) as CaseStatusResponse;
 }

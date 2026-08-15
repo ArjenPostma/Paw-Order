@@ -15,21 +15,26 @@ export interface RateLimitOptions {
     windowMs: number;
     /** Requests allowed per ip per window. */
     max: number;
-    /** Process-wide ceiling per 24h, independent of ip - the backstop when the
-     *  caller can rotate addresses. */
-    dailyMax: number;
 }
 
 /**
- * Fixed-window per-ip limiter with a global daily ceiling.
+ * Fixed-window per-ip limiter.
+ *
+ * Deliberately separate from dailyBudget below. They were one middleware, which
+ * meant the global ceiling was charged at the same point as the per-ip check -
+ * before the body was parsed and before the request was known to be a real
+ * upload. A caller could then spend the entire day's budget on requests that
+ * generated nothing, locking every legitimate player out for 24 hours at zero
+ * cost to themselves. Splitting them lets the cheap per-ip guard run first and
+ * the expensive global one run only once a generation is actually going to
+ * happen.
  *
  * ponytail: in-process state, so the ceilings are per replica and reset on
- * deploy. Correct while the api runs one replica; move to a shared store
- * (Postgres row or Redis) before scaling out.
+ * deploy. Correct while the api runs one replica (DEPLOY.md pins that); move to
+ * a shared store (Postgres row or Redis) before scaling out.
  */
-export function rateLimit({ windowMs, max, dailyMax }: RateLimitOptions): RequestHandler {
+export function rateLimit({ windowMs, max }: RateLimitOptions): RequestHandler {
     const buckets = new Map<string, Bucket>();
-    let daily: Bucket = { count: 0, startedAt: Date.now() };
 
     function prune(now: number): void {
         if (buckets.size < MAX_TRACKED_IPS) {
@@ -50,15 +55,6 @@ export function rateLimit({ windowMs, max, dailyMax }: RateLimitOptions): Reques
 
     return (req, res, next) => {
         const now = Date.now();
-
-        if (now - daily.startedAt >= DAY_MS) {
-            daily = { count: 0, startedAt: now };
-        }
-        if (daily.count >= dailyMax) {
-            res.status(429).json({ error: "The daily limit for new cases has been reached." });
-            return;
-        }
-
         prune(now);
 
         const key = req.ip ?? "unknown";
@@ -71,6 +67,37 @@ export function rateLimit({ windowMs, max, dailyMax }: RateLimitOptions): Reques
             return;
         } else {
             bucket.count += 1;
+        }
+
+        next();
+    };
+}
+
+export interface DailyBudgetOptions {
+    /** Process-wide ceiling per 24h, independent of ip - the backstop when the
+     *  caller can rotate addresses. */
+    dailyMax: number;
+}
+
+/**
+ * Global 24h ceiling on how many cases this process will generate.
+ *
+ * Mount this LAST, after every check that can reject the request for free. It
+ * is the ceiling that actually stands between an anonymous caller and the model
+ * bill, so a slot must only ever be spent on a request that is about to
+ * generate - never on a malformed body, a rejected upload, or a busy server.
+ */
+export function dailyBudget({ dailyMax }: DailyBudgetOptions): RequestHandler {
+    let daily: Bucket = { count: 0, startedAt: Date.now() };
+
+    return (_req, res, next) => {
+        const now = Date.now();
+        if (now - daily.startedAt >= DAY_MS) {
+            daily = { count: 0, startedAt: now };
+        }
+        if (daily.count >= dailyMax) {
+            res.status(429).json({ error: "The daily limit for new cases has been reached." });
+            return;
         }
 
         daily.count += 1;

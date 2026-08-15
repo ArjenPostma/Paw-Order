@@ -1,8 +1,14 @@
 import { Router } from "express";
 import type { RequestHandler } from "express";
 import multer, { MulterError } from "multer";
-import { createCase, findPublicCase } from "@/cases_bundle/services/case_service";
-import { rateLimit } from "@/http/rate_limit";
+import { positiveIntEnv } from "@/config/env";
+import {
+    GenerationBusyError,
+    createCase,
+    findCaseStatus,
+    generationSlotsAvailable,
+} from "@/cases_bundle/services/case_service";
+import { dailyBudget, rateLimit } from "@/http/rate_limit";
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -41,28 +47,77 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
     });
 };
 
-// Generation is anonymous and writes to paid storage, so the endpoint is capped
-// per ip and per day. Without this one caller can fill the bucket and the table,
-// and once the generator makes real model calls, the bill with it. Both ceilings
-// are env-tunable so a load test (or the suite) can raise them without editing code.
-const generationLimiter = rateLimit({
+// Generation is anonymous and writes to paid storage, so it is capped per ip and
+// per day. Both ceilings are env-tunable so a load test (or the suite) can raise
+// them without editing code.
+const perIpLimiter = rateLimit({
     windowMs: 60_000,
-    max: Number(process.env.GENERATION_MAX_PER_MINUTE ?? 1),
-    dailyMax: Number(process.env.GENERATION_MAX_PER_DAY ?? 50),
+    max: positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
+});
+const globalDailyBudget = dailyBudget({
+    dailyMax: positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
 });
 
-export const casesRouter = Router();
+/**
+ * Rejects a full server before multer buffers 8MB of body and before the daily
+ * budget is charged, so back-pressure costs the operator nothing.
+ */
+const rejectWhenBusy: RequestHandler = (_req, res, next) => {
+    if (!generationSlotsAvailable()) {
+        res.setHeader("Retry-After", "60");
+        res.status(503).json({ error: "The court is full. Try again in a minute." });
+        return;
+    }
+    next();
+};
 
-casesRouter.post("/", generationLimiter, uploadPhoto, async (req, res) => {
-    const file = req.file;
-    if (!file) {
+/** Split out so the daily budget can be charged after it, never before. */
+const requirePhoto: RequestHandler = (req, res, next) => {
+    if (!req.file) {
         res.status(400).json({ error: PHOTO_REQUIRED });
         return;
     }
+    next();
+};
 
-    const publicCase = await createCase({ bytes: file.buffer, mimeType: file.mimetype });
-    res.status(201).json(publicCase);
-});
+export const casesRouter = Router();
+
+// Order is load-bearing, cheapest rejection first. The daily budget comes LAST
+// because it is the ceiling that actually bounds the model bill: charging it
+// before the body was parsed meant 50 photoless POSTs could burn the entire
+// day's quota and lock out every real player for 24 hours at zero cost to the
+// caller. A slot is now only ever spent on a request that is about to generate.
+casesRouter.post(
+    "/",
+    perIpLimiter,
+    rejectWhenBusy,
+    uploadPhoto,
+    requirePhoto,
+    globalDailyBudget,
+    async (req, res) => {
+        const file = req.file;
+        if (!file) {
+            res.status(400).json({ error: PHOTO_REQUIRED });
+            return;
+        }
+
+        try {
+            // 202, not 201: the case does not exist yet. Generation runs in the
+            // background and the client polls GET /:id until it is READY.
+            const accepted = await createCase({ bytes: file.buffer, mimeType: file.mimetype });
+            res.status(202).json(accepted);
+        } catch (error: unknown) {
+            // rejectWhenBusy catches the common case; this is the lost race
+            // between two requests that both saw a free slot.
+            if (error instanceof GenerationBusyError) {
+                res.setHeader("Retry-After", "60");
+                res.status(503).json({ error: "The court is full. Try again in a minute." });
+                return;
+            }
+            throw error;
+        }
+    },
+);
 
 casesRouter.get("/:id", async (req, res) => {
     const id = req.params.id;
@@ -74,13 +129,19 @@ casesRouter.get("/:id", async (req, res) => {
         return;
     }
 
-    const publicCase = await findPublicCase(id);
-    if (!publicCase) {
+    const result = await findCaseStatus(id);
+    if (!result) {
         res.status(404).json({ error: "Case not found." });
         return;
     }
 
-    // A generated case never changes, so a reload should not re-fetch it.
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    res.json(publicCase);
+    if (result.status === "READY") {
+        // A generated case never changes, so a reload should not re-fetch it.
+        // Only READY: caching a PENDING body for a year would freeze the poll
+        // on "preparing" and the case would never appear.
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+        res.setHeader("Cache-Control", "no-store");
+    }
+    res.json(result);
 });
