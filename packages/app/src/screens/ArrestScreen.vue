@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, ref } from "vue";
 import type { PublicCase } from "@paw-order/shared";
 
 const props = defineProps<{ currentCase: PublicCase }>();
@@ -7,6 +7,11 @@ defineEmits<{ enter: [] }>();
 
 /** brand.md sets the format; the id is the only real number we have. */
 const docket = computed(() => `PAW-${props.currentCase.id.slice(0, 4).toUpperCase()}`);
+
+// The screen the player is thrown to when generation finishes, with no click of
+// their own behind it, so focus is sitting on document.body until it is moved.
+const headlineRef = ref<HTMLElement | null>(null);
+onMounted(() => headlineRef.value?.focus());
 </script>
 
 <template>
@@ -24,7 +29,9 @@ const docket = computed(() => `PAW-${props.currentCase.id.slice(0, 4).toUpperCas
                 </figure>
 
                 <div class="file__facts">
-                    <h1 class="file__headline">
+                    <!-- tabindex -1 so focus can be moved here on arrival; it
+                         is not in the tab order itself. -->
+                    <h1 ref="headlineRef" class="file__headline" tabindex="-1">
                         {{ currentCase.defendant.name }} has been arrested
                     </h1>
 
@@ -141,6 +148,10 @@ const docket = computed(() => `PAW-${props.currentCase.id.slice(0, 4).toUpperCas
 
 .file__facts {
     flex: 1 1 18rem;
+}
+
+.file__headline:focus {
+    outline: none;
 }
 
 .file__headline {

@@ -26,6 +26,21 @@ function onFileChange(event: Event): void {
     take(file);
 }
 
+/**
+ * dragleave fires on the zone every time the pointer crosses onto one of the
+ * spans inside it, so an unguarded handler flickers the highlight off and back
+ * on as the photo is dragged over the label's own text. Only a leave that lands
+ * outside the zone entirely counts.
+ */
+function onDragLeave(event: DragEvent): void {
+    const zone = event.currentTarget;
+    const entering = event.relatedTarget;
+    if (zone instanceof Node && entering instanceof Node && zone.contains(entering)) {
+        return;
+    }
+    dragging.value = false;
+}
+
 function onDrop(event: DragEvent): void {
     dragging.value = false;
     take(event.dataTransfer?.files[0]);
@@ -49,7 +64,7 @@ function onDrop(event: DragEvent): void {
             class="envelope"
             :class="{ 'envelope--dragging': dragging }"
             @dragover.prevent="dragging = true"
-            @dragleave="dragging = false"
+            @dragleave="onDragLeave"
             @drop.prevent="onDrop"
         >
             <input class="envelope__input" type="file" accept="image/*" @change="onFileChange" />

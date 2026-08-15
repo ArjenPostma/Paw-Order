@@ -216,8 +216,13 @@ export function fixtureTree(): GeneratedTree {
             evidenceIds: [],
             choices: [
                 {
+                    // The suspicion is what separates the two acquitting runs:
+                    // resting leaves it unanswered, pressing the frosting
+                    // clears it. Without that difference every acquittal on the
+                    // fixture carries the same suspicion, and deriveVerdictRules
+                    // has nothing to split them on.
                     text: "The defense rests, Your Honour.",
-                    effects: { doubt: 5, credibility: 5, suspicion: 0, revealsEvidenceIds: [] },
+                    effects: { doubt: 5, credibility: 5, suspicion: 5, revealsEvidenceIds: [] },
                     nextNodeId: null,
                 },
                 {

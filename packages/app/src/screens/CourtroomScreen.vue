@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { nextTick, onMounted, ref, watch } from "vue";
 import type { PublicEvidence, PublicTrialNode, PublicWitness } from "@paw-order/shared";
 
 const props = defineProps<{
@@ -51,6 +51,12 @@ watch(
         statementRef.value?.focus();
     },
 );
+
+// The first question needs it too. "Enter court" destroys the button that had
+// focus, so without this the opening statement is never announced and a
+// keyboard player has to tab in from the top of the document. Not `immediate`
+// on the watch above: that runs before mount, when the ref is still null.
+onMounted(() => statementRef.value?.focus());
 </script>
 
 <template>

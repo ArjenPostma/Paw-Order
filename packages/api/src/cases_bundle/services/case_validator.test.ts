@@ -243,9 +243,9 @@ describe("validateTree", () => {
         );
         expect(result.ok).toBe(true);
         expect(result.ok && result.value.verdictRules).toEqual({
-            acquitAtDoubt: 45,
-            reasonableDoubtAtDoubt: 20,
-            suspiciousAtSuspicion: 0,
+            acquitAtDoubt: 50,
+            reasonableDoubtAtDoubt: 25,
+            suspiciousAtSuspicion: 5,
         });
     });
 

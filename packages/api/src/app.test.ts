@@ -278,9 +278,10 @@ describe("trial turns", () => {
 
         expect(turn.status).toBe(200);
         expect(turn.body.status).toBe("VERDICT");
-        // 55 doubt clears the fixture's derived acquitAtDoubt of 45, but the
-        // run never talks its suspicion down, so the acquittal is tainted.
-        expect(turn.body.verdict).toBe("NOT_GUILTY_BUT_SUSPICIOUS");
+        // 55 doubt clears the fixture's derived acquitAtDoubt of 50, and the
+        // run presses the last point rather than resting, so it carries no
+        // suspicion and the acquittal is clean.
+        expect(turn.body.verdict).toBe("NOT_GUILTY");
         expect(turn.body.score).toBe(95);
         expect(turn.body.truth.summary).toBeTruthy();
         expect(turn.body.node).toBeUndefined();

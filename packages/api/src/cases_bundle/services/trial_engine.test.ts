@@ -230,13 +230,14 @@ describe("enumerateEndings", () => {
 
 describe("deriveVerdictRules", () => {
     it("places both doubt lines inside the fixture's own spread", () => {
-        // Doubts run 10..55 over eight endings, so the 70th percentile lands on
-        // 45 and the 30th on 20 - not the 60 a model would have guessed at,
-        // which no run of this tree can reach.
+        // Doubts run 10..55 over eight endings, two of them tied at the 10 the
+        // early concessions bottom out at. Both lines are placed among the runs
+        // ABOVE that tie - 50 and 25 - so neither collapses onto the minimum
+        // and leaves the verdict below it unreachable.
         expect(fixtureTree().verdictRules).toEqual({
-            acquitAtDoubt: 45,
-            reasonableDoubtAtDoubt: 20,
-            suspiciousAtSuspicion: 0,
+            acquitAtDoubt: 50,
+            reasonableDoubtAtDoubt: 25,
+            suspiciousAtSuspicion: 5,
         });
     });
 
@@ -250,6 +251,24 @@ describe("deriveVerdictRules", () => {
             "NOT_GUILTY",
             "NOT_GUILTY_BUT_SUSPICIOUS",
         ]);
+    });
+
+    it("keeps a conviction reachable when runs tie at the lowest doubt", () => {
+        // Two runs bottom out at 0, which is what an early concession looks
+        // like. A plain 30th percentile over these six lands ON that 0, every
+        // run then clears the reasonable-doubt line, and GUILTY quietly stops
+        // existing. Both lines have to sit above the tie.
+        const endings = [0, 0, 10, 20, 30, 40].map((doubt) => ({
+            doubt,
+            credibility: 0,
+            suspicion: 0,
+            revealedEvidenceIds: [],
+        }));
+        const rules = deriveVerdictRules(endings);
+        expect(rules).toBeDefined();
+
+        const reached = new Set(endings.map((state) => resolveVerdict(state, rules!)));
+        expect(reached.has("GUILTY")).toBe(true);
     });
 
     it("refuses a tree whose runs all total the same doubt", () => {

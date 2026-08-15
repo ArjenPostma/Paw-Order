@@ -94,6 +94,14 @@ export interface TrialNode {
  * model asked for these picks them before it knows what its own effects total,
  * which put ~80% of runs on NOT_GUILTY and left NOT_GUILTY_BUT_SUSPICIOUS
  * unreachable across every case sampled.
+ *
+ * The doubt lines are guaranteed to divide the tree; the suspicion one is not.
+ * When every acquitting run carries the same suspicion there is no value that
+ * taints some and spares others, and the threshold goes out of reach rather
+ * than tainting them all - so NOT_GUILTY_BUT_SUSPICIOUS can still be a dead
+ * verdict on an individual case. That is left to the tree prompt, which asks
+ * for suspicion to vary, rather than rejected here: a whole regeneration is too
+ * much to spend on which flavour of acquittal a case can reach.
  */
 export interface VerdictRules {
     /** Doubt at or above this acquits. */

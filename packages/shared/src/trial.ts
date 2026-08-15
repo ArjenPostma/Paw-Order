@@ -177,10 +177,21 @@ export function enumerateEndings(nodes: TrialNode[], rootNodeId: string): GameSt
     return overflowed ? null : endings;
 }
 
-/** The value at `quantile` of an ascending list. */
-function at(sorted: number[], quantile: number): number {
-    const index = Math.min(sorted.length - 1, Math.floor(sorted.length * quantile));
-    return sorted[index] ?? 0;
+/**
+ * The value at `quantile` of an ascending list, counting only values strictly
+ * above `floor`. Null when there are none.
+ *
+ * Every threshold here has to clear the lowest run in the tree, and a plain
+ * quantile does not: on endings of 0, 0, 10, 20, 30, 40 the 30th percentile
+ * lands on 0 itself, so every run sits at or above it and the verdict below
+ * that line becomes unreachable. Ties at the minimum are not unusual - two
+ * branches that concede early bottom out at the same total - so this is the
+ * common case, not a pathological one.
+ */
+function splitAbove(sorted: number[], quantile: number, floor: number): number | null {
+    const above = sorted.filter((value) => value > floor);
+    const index = Math.min(above.length - 1, Math.floor(above.length * quantile));
+    return above[index] ?? null;
 }
 
 /**
@@ -194,9 +205,15 @@ export function deriveVerdictRules(endings: GameState[]): VerdictRules | null {
         return null;
     }
     const doubts = endings.map((ending) => ending.doubt).sort((a, b) => a - b);
-    const acquitAtDoubt = at(doubts, ACQUIT_QUANTILE);
     const lowest = doubts[0];
-    if (lowest === undefined || lowest >= acquitAtDoubt) {
+    if (lowest === undefined) {
+        return null;
+    }
+    const acquitAtDoubt = splitAbove(doubts, ACQUIT_QUANTILE, lowest);
+    const reasonableDoubtAtDoubt = splitAbove(doubts, REASONABLE_DOUBT_QUANTILE, lowest);
+    // Both are null together: nothing above the lowest total means every run in
+    // the tree ends on the same doubt, which is the one case worth rejecting.
+    if (acquitAtDoubt === null || reasonableDoubtAtDoubt === null) {
         return null;
     }
 
@@ -208,7 +225,7 @@ export function deriveVerdictRules(endings: GameState[]): VerdictRules | null {
         .sort((a, b) => a - b);
     return {
         acquitAtDoubt,
-        reasonableDoubtAtDoubt: at(doubts, REASONABLE_DOUBT_QUANTILE),
+        reasonableDoubtAtDoubt,
         suspiciousAtSuspicion: suspiciousAt(suspicions),
     };
 }
@@ -227,8 +244,7 @@ function suspiciousAt(sorted: number[]): number {
     if (lowest === undefined || highest === undefined) {
         return 1;
     }
-    const above = [...new Set(sorted)].filter((value) => value > lowest);
-    return above[Math.floor(above.length * SUSPICIOUS_QUANTILE)] ?? highest + 1;
+    return splitAbove(sorted, SUSPICIOUS_QUANTILE, lowest) ?? highest + 1;
 }
 
 /**
