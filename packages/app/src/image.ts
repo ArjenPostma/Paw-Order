@@ -21,27 +21,35 @@ const QUALITY = 0.85;
  */
 export async function downscale(file: File): Promise<File> {
     try {
-        const bitmap = await createImageBitmap(file);
-        const scale = MAX_EDGE / Math.max(bitmap.width, bitmap.height);
-        if (scale >= 1) {
-            bitmap.close();
-            return file;
-        }
+        // from-image, not the default: the canvas re-encode below drops EXIF, so
+        // a portrait phone photo whose rotation lives only in that tag would be
+        // uploaded sideways - to the mugshot and to the image model both.
+        const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+        let blob;
+        try {
+            const scale = MAX_EDGE / Math.max(bitmap.width, bitmap.height);
+            if (scale >= 1) {
+                return file;
+            }
 
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(bitmap.width * scale);
-        canvas.height = Math.round(bitmap.height * scale);
-        const context = canvas.getContext("2d");
-        if (!context) {
-            bitmap.close();
-            return file;
-        }
-        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-        bitmap.close();
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.round(bitmap.width * scale);
+            canvas.height = Math.round(bitmap.height * scale);
+            const context = canvas.getContext("2d");
+            if (!context) {
+                return file;
+            }
+            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 
-        const blob = await new Promise<Blob | null>((resolve) => {
-            canvas.toBlob(resolve, ENCODED_TYPE, QUALITY);
-        });
+            blob = await new Promise<Blob | null>((resolve) => {
+                canvas.toBlob(resolve, ENCODED_TYPE, QUALITY);
+            });
+        } finally {
+            // finally, not a call per exit: a throw between the decode and here
+            // happens under memory pressure, which is the worst moment to leak
+            // a decoded bitmap.
+            bitmap.close();
+        }
         if (!blob || blob.size >= file.size) {
             return file;
         }

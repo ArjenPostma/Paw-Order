@@ -141,7 +141,11 @@ export function publicEvidence(exhibit: Evidence): PublicEvidence {
         id: exhibit.id,
         label: exhibit.label,
         imageUrl: exhibit.imageUrl,
-        thumbUrl: exhibit.thumbUrl,
+        // Normalised, not copied: cases persisted before thumbUrl existed
+        // deserialize without the key, and an undefined would be dropped by
+        // JSON.stringify entirely - leaving the field absent from a response
+        // whose type says it is always there.
+        thumbUrl: exhibit.thumbUrl ?? null,
         visualFacts: exhibit.visualFacts,
     };
 }

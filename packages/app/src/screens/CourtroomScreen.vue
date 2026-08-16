@@ -34,6 +34,18 @@ const statementRef = ref<HTMLElement | null>(null);
 const lightboxRef = ref<HTMLDialogElement | null>(null);
 const zoomed = ref<PublicEvidence | null>(null);
 
+/**
+ * Starts the full exhibit downloading on hover or focus, so the lightbox opens
+ * on a cached image rather than a cold fetch. The strip only holds the small
+ * copy now, so without this the first thing an opened exhibit shows is nothing.
+ * Only on intent, never up front: a player who opens none should pay for none.
+ */
+function warmExhibit(exhibit: PublicEvidence): void {
+    if (exhibit.imageUrl) {
+        new Image().src = exhibit.imageUrl;
+    }
+}
+
 function openExhibit(exhibit: PublicEvidence): void {
     zoomed.value = exhibit;
     lightboxRef.value?.showModal();
@@ -157,6 +169,8 @@ onMounted(() => statementRef.value?.focus());
                                 class="exhibit__open"
                                 type="button"
                                 @click="openExhibit(exhibit)"
+                                @mouseenter="warmExhibit(exhibit)"
+                                @focus="warmExhibit(exhibit)"
                             >
                                 <!-- The strip copy when the generator wrote one;
                                      cases from before it existed still have only

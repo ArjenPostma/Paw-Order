@@ -217,7 +217,11 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
             `facts.evidence must hold exactly ${String(EVIDENCE_COUNT)} exhibits, got ${String(evidenceSource.length)}`,
         );
     }
-    const evidence: Evidence[] = evidenceSource.map((item, index) => {
+    // Sliced, not mapped whole: the length error above already condemns the
+    // response, and every error collected here goes back into the retry prompt.
+    // A model that answers with 20,000 exhibits would otherwise build a
+    // multi-megabyte prompt out of a response already known to be unusable.
+    const evidence: Evidence[] = evidenceSource.slice(0, EVIDENCE_COUNT).map((item, index) => {
         const path = `facts.evidence[${String(index)}]`;
         const source = check.record(item, path);
         const visualFacts = check.strings(source, "visualFacts", path);
@@ -312,7 +316,9 @@ export function validateTree(
         );
     }
 
-    const nodes: TrialNode[] = nodeSource.map((item, index) => {
+    // Sliced for the same reason facts.evidence is: the length check above has
+    // already failed the response, and the error list becomes the retry prompt.
+    const nodes: TrialNode[] = nodeSource.slice(0, MAX_NODES).map((item, index) => {
         const path = `tree.nodes[${String(index)}]`;
         const source = check.record(item, path);
 

@@ -42,6 +42,13 @@ const preparing = ref(false);
  * limit - still belong on the upload screen, where the retry is.
  */
 const stalled = ref<string | null>(null);
+/**
+ * The photo and name of an attempt the api refused, handed back to the upload
+ * screen. That screen is unmounted while a case generates, so without this a
+ * rejected upload - the commonest failure, and the one most worth retrying -
+ * costs the player their typed name and another trip through the file picker.
+ */
+const retry = ref<{ file: File; name: string } | null>(null);
 
 /**
  * The run. `path` is the whole list of choice indexes taken so far: the api
@@ -75,6 +82,9 @@ function openCase(ready: PublicCase): void {
     currentCase.value = ready;
     entered.value = false;
     preparing.value = false;
+    // The attempt landed, so there is nothing left to retry - and holding the
+    // File would pin the whole photo in memory for the length of the trial.
+    retry.value = null;
     rememberCase({
         id: ready.id,
         name: ready.defendant.name,
@@ -179,6 +189,7 @@ function takeAnotherCase(): void {
     error.value = null;
     preparing.value = false;
     stalled.value = null;
+    retry.value = null;
 }
 
 async function choose(index: number): Promise<void> {
@@ -234,6 +245,7 @@ async function onPhoto(file: File, name: string): Promise<void> {
     preparing.value = true;
     error.value = null;
     stalled.value = null;
+    retry.value = { file, name };
     currentCase.value = null;
     entered.value = false;
 
@@ -287,6 +299,7 @@ async function onPhoto(file: File, name: string): Promise<void> {
         :error="error"
         :previous="previous"
         :opening="opening"
+        :retry="retry"
         @photo="onPhoto"
         @replay="onReplay"
     />

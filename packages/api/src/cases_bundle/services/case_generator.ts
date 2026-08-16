@@ -125,8 +125,12 @@ function parseJson(text: string): unknown {
  * one per exhibit. allSettled, not all: a refused or malformed image leaves that
  * exhibit pictureless (Evidence.imageUrl is nullable for exactly this) and the
  * trial still plays. Losing a whole generated case to one flaky call is worse.
+ *
+ * Exported for its test only: generateCaseBible answers the fixture under
+ * APP_ENV=test and never reaches this, so without a seam here the whole
+ * full-plus-thumbnail wiring could be deleted with every test still green.
  */
-async function renderEvidence(
+export async function renderEvidence(
     evidence: Evidence[],
     photo: EncodedImage,
     signal: AbortSignal,

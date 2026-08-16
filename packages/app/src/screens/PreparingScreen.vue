@@ -25,8 +25,11 @@ defineEmits<{ leave: [] }>();
 const shown = ref(1);
 
 const timer = setInterval(() => {
-    if (shown.value < STAGES.length) {
-        shown.value += 1;
+    shown.value += 1;
+    // The last line stays up however long the wait runs, so once it is struck
+    // there is nothing left to wake for.
+    if (shown.value >= STAGES.length) {
+        clearInterval(timer);
     }
 }, STAGE_MS);
 
@@ -37,7 +40,10 @@ onUnmounted(() => clearInterval(timer));
     <main class="preparing">
         <article class="log">
             <p class="docket-line">Clerk of the court</p>
-            <h1 class="log__title">{{ stalled ? "Case abandoned" : "Preparing the case" }}</h1>
+            <!-- Not "abandoned": nobody abandoned anything. This state is a
+                 generation that failed or never came back, and the player is the
+                 one still waiting on it. -->
+            <h1 class="log__title">{{ stalled ? "No case filed" : "Preparing the case" }}</h1>
 
             <!-- The panel the player has been watching is the panel that owes
                  them the answer, so the log is replaced in place rather than
