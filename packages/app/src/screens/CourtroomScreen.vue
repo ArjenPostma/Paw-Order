@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PublicEvidence, PublicTrialNode, PublicWitness } from "@paw-order/shared";
 import CaseTimeline from "@/components/CaseTimeline.vue";
 
@@ -29,6 +29,99 @@ const SPEAKER_NAMES = {
 // player tabs through every exhibit again on each question.
 const statementRef = ref<HTMLElement | null>(null);
 
+/**
+ * The one-column layout, at the same width the stylesheet below switches at.
+ * The breakpoint is in both places because those sections do not merely restyle
+ * there - they move into the sheet, and a Teleport cannot read a media query.
+ */
+const oneColumn = window.matchMedia("(max-width: 52rem)");
+const narrow = ref(oneColumn.matches);
+
+/**
+ * Which drawer of the file is open on the phone, or null for none. On one
+ * column the exhibits and the witness statements sit a screen below the
+ * responses, where a player answering questions never meets them, so there they
+ * move into a sheet the bar along the bottom raises. The timeline stays on the
+ * page: it is the one thing here the arrest sheet already showed.
+ */
+const sheet = ref<"exhibits" | "witnesses" | null>(null);
+const sheetRef = ref<HTMLDialogElement | null>(null);
+
+// One definition, rendered twice: once along the bottom of the courtroom and
+// once inside the sheet, which is the only one of the two reachable while the
+// sheet is up - the sheet is in the top layer and its backdrop covers the bar.
+const tabs = computed(
+    () =>
+        [
+            { key: "exhibits", label: "Exhibits", count: props.exhibits.length },
+            { key: "witnesses", label: "Witnesses", count: props.witnesses.length },
+        ] as const,
+);
+
+/**
+ * The exhibits that have arrived since the drawer was last open, and the line
+ * that says one has. A tab counting up from (1) to (2) is not something anyone
+ * notices with a question on screen, and an exhibit entering mid-trial is the
+ * one event here the player has to act on.
+ */
+const announced = new Set(props.exhibits.map((exhibit) => exhibit.id));
+const unseen = ref(0);
+const entered = ref<string | null>(null);
+/** Long enough to read a line of it, short enough not to sit over the answer. */
+const ENTERED_MS = 7000;
+let enteredTimer: ReturnType<typeof setTimeout> | undefined;
+
+watch(
+    () => props.exhibits,
+    (list) => {
+        // The api sends the whole revealed set every turn, so "new" is whatever
+        // this component has not already said out loud.
+        const fresh = list.filter((exhibit) => !announced.has(exhibit.id));
+        if (fresh.length === 0) {
+            return;
+        }
+        for (const exhibit of fresh) {
+            announced.add(exhibit.id);
+        }
+        unseen.value += fresh.length;
+        entered.value = `New evidence: ${fresh.map((exhibit) => `${exhibit.id} ${exhibit.label}`).join(" · ")}`;
+        clearTimeout(enteredTimer);
+        enteredTimer = setTimeout(() => (entered.value = null), ENTERED_MS);
+    },
+);
+
+/** Tapping the tab that is already up closes the sheet, the way a drawer shuts. */
+function toggleSheet(which: "exhibits" | "witnesses"): void {
+    if (which === "exhibits") {
+        unseen.value = 0;
+    }
+    if (sheet.value === which) {
+        sheetRef.value?.close();
+        return;
+    }
+    sheet.value = which;
+    // showModal throws on an already-open dialog, and switching tabs from
+    // inside the sheet does exactly that.
+    if (sheetRef.value?.open !== true) {
+        sheetRef.value?.showModal();
+    }
+}
+
+function onLayoutChange(event: MediaQueryListEvent): void {
+    narrow.value = event.matches;
+    // On the wide layout the contents teleport back onto the page, so a sheet
+    // left open there is an empty modal over a page already showing them.
+    if (!event.matches) {
+        sheetRef.value?.close();
+    }
+}
+
+oneColumn.addEventListener("change", onLayoutChange);
+onBeforeUnmount(() => {
+    oneColumn.removeEventListener("change", onLayoutChange);
+    clearTimeout(enteredTimer);
+});
+
 // The lightbox is a native <dialog> opened with showModal: the focus trap, Esc
 // to close, the backdrop and the top layer all come with it, so there is no
 // keyboard handling or scroll locking to write here.
@@ -56,6 +149,12 @@ function openExhibit(exhibit: PublicEvidence): void {
 function onLightboxClick(event: MouseEvent): void {
     if (event.target === lightboxRef.value) {
         lightboxRef.value?.close();
+    }
+}
+
+function onSheetClick(event: MouseEvent): void {
+    if (event.target === sheetRef.value) {
+        sheetRef.value?.close();
     }
 }
 
@@ -146,71 +245,92 @@ onMounted(() => statementRef.value?.focus());
                         </p>
                     </section>
 
+                    <!-- Always mounted and never v-if'd, for the reason the
+                         examination above is: a live region only speaks when it
+                         was already in the tree before its text changed. -->
+                    <p class="entered" :class="{ 'entered--on': entered }" role="status">
+                        {{ entered }}
+                    </p>
+
                     <!-- Laid out along a row the way exhibits are laid along the
                          front of a bench: the player compares them against each
                          other, which a vertical column made awkward. Only what
                          the trial has put in play - shipping all three up front
                          let a player read the clock against a witness claim and
-                         work out who was lying before question one. -->
-                    <section class="evidence">
-                        <h2 class="field-label evidence__title">Exhibits</h2>
-                        <p v-if="exhibits.length === 0" class="evidence__empty">
-                            Nothing entered into evidence yet.
-                        </p>
-                        <div v-else class="evidence__strip">
-                            <figure v-for="exhibit in exhibits" :key="exhibit.id" class="exhibit">
-                                <span class="exhibit__tape" aria-hidden="true"></span>
-                                <button
-                                    v-if="exhibit.imageUrl"
-                                    class="exhibit__open"
-                                    type="button"
-                                    @click="openExhibit(exhibit)"
-                                    @mouseenter="warmExhibit(exhibit)"
-                                    @focus="warmExhibit(exhibit)"
+                         work out who was lying before question one.
+
+                         On one column this whole section is in the sheet, so the
+                         markup is written once and moved. `defer` because the
+                         sheet it lands in is further down this template. -->
+                    <Teleport defer to="#sheet-exhibits" :disabled="!narrow">
+                        <section class="evidence">
+                            <h2 class="field-label evidence__title">Exhibits</h2>
+                            <p v-if="exhibits.length === 0" class="evidence__empty">
+                                Nothing entered into evidence yet.
+                            </p>
+                            <div v-else class="evidence__strip">
+                                <figure
+                                    v-for="exhibit in exhibits"
+                                    :key="exhibit.id"
+                                    class="exhibit"
                                 >
-                                    <!-- The strip copy when the generator wrote
+                                    <span class="exhibit__tape" aria-hidden="true"></span>
+                                    <button
+                                        v-if="exhibit.imageUrl"
+                                        class="exhibit__open"
+                                        type="button"
+                                        @click="openExhibit(exhibit)"
+                                        @mouseenter="warmExhibit(exhibit)"
+                                        @focus="warmExhibit(exhibit)"
+                                    >
+                                        <!-- The strip copy when the generator wrote
                                          one; cases from before it existed still
                                          have only the full exhibit. The lightbox
                                          below always opens the full one. -->
-                                    <img
-                                        class="exhibit__image"
-                                        :src="exhibit.thumbUrl ?? exhibit.imageUrl"
-                                        :alt="`${exhibit.label}. Enlarge.`"
-                                        loading="lazy"
-                                    />
-                                </button>
-                                <figcaption class="exhibit__caption">
-                                    <span class="exhibit__tag">{{ exhibit.id }}</span>
-                                    {{ exhibit.label }}
-                                    <ul class="exhibit__facts">
-                                        <!-- Keyed by position: visualFacts is
+                                        <img
+                                            class="exhibit__image"
+                                            :src="exhibit.thumbUrl ?? exhibit.imageUrl"
+                                            :alt="`${exhibit.label}. Enlarge.`"
+                                            loading="lazy"
+                                        />
+                                    </button>
+                                    <figcaption class="exhibit__caption">
+                                        <span class="exhibit__tag">{{ exhibit.id }}</span>
+                                        {{ exhibit.label }}
+                                        <ul class="exhibit__facts">
+                                            <!-- Keyed by position: visualFacts is
                                              model output with no uniqueness
                                              constraint, and two identical
                                              entries collide. -->
-                                        <li
-                                            v-for="(fact, index) in exhibit.visualFacts"
-                                            :key="`${exhibit.id}-${index}`"
-                                        >
-                                            {{ fact }}
-                                        </li>
-                                    </ul>
-                                </figcaption>
-                            </figure>
-                        </div>
-                    </section>
+                                            <li
+                                                v-for="(fact, index) in exhibit.visualFacts"
+                                                :key="`${exhibit.id}-${index}`"
+                                            >
+                                                {{ fact }}
+                                            </li>
+                                        </ul>
+                                    </figcaption>
+                                </figure>
+                            </div>
+                        </section>
+                    </Teleport>
                 </div>
 
                 <aside class="rail">
-                    <h2 class="field-label rail__title">Witnesses</h2>
-                    <!-- One card per statement, each with its own name plate.
-                         As paragraphs these ran into the timeline below them,
-                         and telling two witnesses apart is the whole job of
-                         this rail: the contradiction the player is hunting is
-                         between one of these and a clock. -->
-                    <article v-for="witness in witnesses" :key="witness.id" class="witness">
-                        <h3 class="witness__name">{{ witness.name }}</h3>
-                        <p class="witness__claim">{{ witness.claim }}</p>
-                    </article>
+                    <!-- Heading and cards move together: left behind, the
+                         heading would label an empty rail on one column. -->
+                    <Teleport defer to="#sheet-witnesses" :disabled="!narrow">
+                        <h2 class="field-label rail__title">Witnesses</h2>
+                        <!-- One card per statement, each with its own name plate.
+                             As paragraphs these ran into the timeline below them,
+                             and telling two witnesses apart is the whole job of
+                             this rail: the contradiction the player is hunting is
+                             between one of these and a clock. -->
+                        <article v-for="witness in witnesses" :key="witness.id" class="witness">
+                            <h3 class="witness__name">{{ witness.name }}</h3>
+                            <p class="witness__claim">{{ witness.claim }}</p>
+                        </article>
+                    </Teleport>
 
                     <!-- Same list the arrest sheet showed, kept in reach: the
                          contradiction a player is hunting is usually between a
@@ -238,6 +358,55 @@ onMounted(() => statementRef.value?.focus());
                 &larr; Abandon this case
             </button>
         </p>
+
+        <!-- The two drawers of the file, along the bottom of the phone. Drawn
+             only on one column; on the wide layout both sections are already on
+             the page beside the responses. -->
+        <nav class="drawers" aria-label="Case file">
+            <button
+                v-for="tab in tabs"
+                :key="tab.key"
+                class="drawers__tab"
+                :class="{ 'drawers__tab--fresh': tab.key === 'exhibits' && unseen > 0 }"
+                type="button"
+                :disabled="tab.count === 0"
+                :aria-expanded="sheet === tab.key"
+                @click="toggleSheet(tab.key)"
+            >
+                {{ tab.label }} ({{ tab.count }})
+            </button>
+        </nav>
+
+        <!-- A native dialog again, for the same reasons the lightbox is one: the
+             focus trap, Esc, the backdrop and the top layer are all free. An
+             exhibit opened from in here puts the lightbox on top of it, which is
+             what the top layer does with the later showModal. -->
+        <dialog ref="sheetRef" class="sheet" @click="onSheetClick" @close="sheet = null">
+            <div class="sheet__panel">
+                <div class="sheet__bar">
+                    <button
+                        v-for="tab in tabs"
+                        :key="tab.key"
+                        class="drawers__tab"
+                        type="button"
+                        :disabled="tab.count === 0"
+                        :aria-expanded="sheet === tab.key"
+                        @click="toggleSheet(tab.key)"
+                    >
+                        {{ tab.label }} ({{ tab.count }})
+                    </button>
+                    <button class="sheet__close" type="button" @click="sheetRef?.close()">
+                        Close
+                    </button>
+                </div>
+
+                <!-- The landing places. Empty on the wide layout, where the
+                     Teleports above are disabled and their contents stay on the
+                     page - and the sheet is never opened there. -->
+                <div v-show="sheet === 'exhibits'" id="sheet-exhibits" class="sheet__body"></div>
+                <div v-show="sheet === 'witnesses'" id="sheet-witnesses" class="sheet__body"></div>
+            </div>
+        </dialog>
 
         <dialog ref="lightboxRef" class="lightbox" @click="onLightboxClick" @close="zoomed = null">
             <figure v-if="zoomed" class="lightbox__panel">
@@ -517,6 +686,14 @@ onMounted(() => statementRef.value?.focus());
     border-top: var(--rule);
 }
 
+/* With the witnesses moved into the drawer the timeline is all the rail holds,
+   so the rule that separated the two records would double up on the rail's own. */
+.rail__title--second:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+}
+
 /* One statement, filed. The plate is what separates two witnesses at a glance,
    which a bold first line was not doing. */
 .witness {
@@ -545,6 +722,209 @@ onMounted(() => statementRef.value?.focus());
     font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--ink-soft);
+}
+
+/* The clerk's line when something is entered mid-trial. The height is held
+   whether it says anything or not: it sits directly above the exhibits on the
+   wide layout and above the drawer bar on the narrow one, and neither may move
+   under a player reaching for an answer. */
+.entered {
+    min-height: 1.4rem;
+    margin: 0.75rem 0 0;
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--stamp);
+    opacity: 0;
+    transition: opacity 500ms ease;
+}
+
+.entered--on {
+    opacity: 1;
+    animation: entered-in 260ms ease-out;
+}
+
+/* Stamped on rather than faded in, so it is caught out of the corner of an eye
+   that is reading the responses above it. */
+@keyframes entered-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+}
+
+/* Nothing on two columns, where both sections are already on the page. Shown by
+   the one-column block at the bottom of this sheet. */
+.drawers {
+    display: none;
+}
+
+.drawers__tab {
+    flex: 1;
+    padding: 0.85rem 0.5rem;
+    background: var(--paper-shade);
+    color: var(--ink);
+    border: none;
+    font-family: var(--display);
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    transition:
+        background 140ms ease,
+        color 140ms ease;
+}
+
+/* The drawer that is out. Same inverted plate a witness name gets. */
+.drawers__tab[aria-expanded="true"] {
+    background: var(--ink);
+    color: var(--paper);
+}
+
+/* Something has been filed in there that the player has not opened the drawer
+   on. The pulse runs twice and stops; the dot stays until they look. Under
+   reduced motion the global rule cuts the pulse and the dot carries it alone. */
+.drawers__tab--fresh {
+    animation: tab-pulse 900ms ease-out 2;
+}
+
+.drawers__tab--fresh::after {
+    content: "";
+    display: inline-block;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-left: 0.4rem;
+    vertical-align: 0.08em;
+    border-radius: 50%;
+    background: var(--stamp);
+}
+
+@keyframes tab-pulse {
+    50% {
+        background: var(--stamp);
+        color: var(--paper);
+    }
+}
+
+/* Nothing filed under it yet - the trial enters exhibits as it goes. */
+.drawers__tab:disabled {
+    color: var(--ink-soft);
+    opacity: 0.55;
+    cursor: default;
+}
+
+/* The drawer itself: pinned to the bottom edge, never taller than most of the
+   screen, and scrolling inside rather than moving the courtroom behind it. */
+.sheet {
+    position: fixed;
+    inset: auto 0 0;
+    width: 100%;
+    max-width: 100%;
+    max-height: 82vh;
+    margin: 0;
+    padding: 0;
+    /* On the dialog, not on the panel inside it: the panel is what scrolls past,
+       so a rule drawn there slid up off the top edge on the first swipe. */
+    border: none;
+    border-top: 6px solid var(--ink);
+    background: none;
+    overflow-y: auto;
+    /* The bar the tabs sit on is drawn under the backdrop, so the sheet has to
+       clear the home indicator itself. */
+    padding-bottom: env(safe-area-inset-bottom);
+    overscroll-behavior: contain;
+    animation: sheet-in 220ms ease-out;
+}
+
+/* Slides up out of the bar that opened it. The global reduced-motion rule cuts
+   the duration to nothing, so this stays a straight appearance for anyone who
+   asked for less movement. */
+@keyframes sheet-in {
+    from {
+        transform: translateY(100%);
+    }
+}
+
+.sheet::backdrop {
+    background: rgb(20 24 33 / 62%);
+}
+
+.sheet__panel {
+    background: var(--paper-shade);
+    padding: 0 var(--step) var(--step);
+}
+
+/* Held at the top of the drawer while its contents scroll: this is the only
+   copy of the tabs reachable while the sheet is up, since the bar along the
+   bottom of the courtroom is behind the backdrop. */
+.sheet__bar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin: 0 calc(var(--step) * -1);
+    padding: 0 0.5rem;
+    background: var(--paper-shade);
+    border-bottom: var(--rule);
+    /* So the exhibits read as passing underneath it rather than through it. */
+    box-shadow: 0 6px 10px rgb(23 28 38 / 10%);
+}
+
+.sheet__close {
+    flex: none;
+    padding: 0 0.75rem;
+    background: none;
+    border: none;
+    color: var(--ink-soft);
+    font-family: var(--transcript);
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.sheet__close:hover {
+    color: var(--ink);
+}
+
+/* The evidence section brings its own rule and heading with it, and inside the
+   drawer the rule sits directly under the sticky bar's. */
+.sheet__body > .evidence {
+    border-top: none;
+}
+
+/* The tab that pulled the drawer open already names what is in it, so the
+   heading is repeating the word directly above it. Taken out of the picture but
+   left in the accessibility tree: it is what gives the drawer its structure for
+   anyone who cannot see which tab is lit. */
+/* The exhibits arrive with their section's own padding; the witness cards have
+   none of their own, and with the heading clipped they started against the bar. */
+#sheet-witnesses {
+    padding-top: 1.25rem;
+}
+
+.sheet__body .evidence__title,
+.sheet__body .rail__title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* In the drawer the photographs run full width, one under the other, rather
+   than along a bench: a sideways strip on a phone hides the third exhibit
+   behind a gesture nothing announces, and a clock face is worth the width. */
+.sheet__body .evidence__strip {
+    flex-direction: column;
+    align-items: stretch;
+    overflow-x: visible;
+}
+
+.sheet__body .exhibit {
+    flex: 0 0 auto;
 }
 
 .evidence {
@@ -719,11 +1099,41 @@ onMounted(() => statementRef.value?.focus());
         grid-template-columns: minmax(0, 1fr);
     }
 
+    /* Out of the flow along the bottom edge, so the drawers are in reach at
+       whatever point of the transcript the player has scrolled to. */
+    .drawers {
+        display: flex;
+        position: fixed;
+        inset: auto 0 0;
+        z-index: 5;
+        gap: 1px;
+        background: var(--paper-edge);
+        border-top: 2px solid var(--ink);
+        padding-bottom: env(safe-area-inset-bottom);
+        box-shadow: 0 -6px 18px rgb(23 28 38 / 18%);
+    }
+
+    /* The room the bar takes, which it cannot claim itself. */
+    .court {
+        padding-bottom: calc(4.5rem + env(safe-area-inset-bottom));
+    }
+
     .rail {
         border-left: none;
         border-top: var(--rule);
         padding-left: 0;
         padding-top: 1.5rem;
+    }
+
+    /* Six and a half lines held, and a floor rather than a ceiling. The
+       reservation exists to hold the exhibit strip still, and on one column the
+       strip is off-screen while the statement is being read - so a long
+       statement moving the page is a cheaper price than reading it through a
+       scrollbox inside a scrolling page. */
+    .examination__frame {
+        height: auto;
+        min-height: 9.75em;
+        overflow-y: visible;
     }
 }
 </style>

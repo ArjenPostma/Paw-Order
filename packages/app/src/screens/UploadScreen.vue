@@ -552,8 +552,7 @@ function onDrop(event: DragEvent): void {
     text-align: left;
 }
 
-/* Mugshots clipped to the file, along the bottom of the cover. Scrolls rather
-   than wraps for the same reason the exhibit strip does. */
+/* Mugshots clipped to the file, along the bottom of the cover. */
 .prior {
     width: min(46rem, 100%);
     margin-top: 2rem;
@@ -579,22 +578,23 @@ function onDrop(event: DragEvent): void {
     cursor: progress;
 }
 
+/* Wraps rather than scrolls: a sideways strip on a phone hides everything past
+   the second tile behind a gesture nothing announces. auto-fill sizes the row to
+   the sheet - six across the cover, two on a phone - and the counts are bounded
+   (six of the player's own, twelve on the public docket) so the rows are too. */
 .prior__strip {
     list-style: none;
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr));
     gap: 0.75rem;
     margin: 0.5rem 0 0;
-    /* overflow-x: auto clips vertically too, so the tile's hover lift would cut
-       its own top border off against the scroll box. The padding is the room it
-       lifts into. */
+    /* The room the tile's hover lift moves into. */
     padding: 0.25rem 0;
-    overflow-x: auto;
 }
 
 .prior__case {
     display: grid;
     gap: 0.15rem;
-    width: 7rem;
     padding: 0.35rem;
     background: var(--paper-shade);
     color: var(--ink);

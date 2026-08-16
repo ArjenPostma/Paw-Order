@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
     PublicCase,
     PublicCaseSummary,
@@ -338,6 +338,15 @@ const screen = computed(() => {
     }
     return outcome.value ? "verdict" : "courtroom";
 });
+
+/**
+ * Every screen is a new page of the file, and the browser keeps the scroll of
+ * the one before it: a case opened from the bottom of the strip - which is where
+ * the strip is on a phone - arrived on the arrest sheet already scrolled past
+ * its own heading. Here rather than in each screen's onMounted, so it holds for
+ * every move between them, including Back.
+ */
+watch(screen, () => window.scrollTo({ top: 0 }), { flush: "post" });
 
 function startTrial(): void {
     path.value = [];
