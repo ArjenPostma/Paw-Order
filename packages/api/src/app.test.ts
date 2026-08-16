@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "@/app";
 import {
     assertAppEnvExplicit,
@@ -197,6 +197,77 @@ describe("api wiring", () => {
             // guards is the key going missing from the wire entirely.
             expect("thumbUrl" in exhibit).toBe(true);
         }
+    });
+
+    // The upload gate, driven through the two knobs screenPhoto reads under
+    // APP_ENV=test. Without them the check answers a flat yes to both questions
+    // and neither rejection below is reachable over HTTP - which is to say
+    // requireDog could be unmounted from the router entirely and every other
+    // test in this file would still pass.
+    describe("photo screening", () => {
+        afterEach(() => {
+            delete process.env.TEST_PHOTO_IS_DOG;
+            delete process.env.TEST_PHOTO_IS_SAFE;
+        });
+
+        it("turns away a photo with no dog in it", async () => {
+            process.env.TEST_PHOTO_IS_DOG = "false";
+
+            const response = await request(app)
+                .post("/api/cases")
+                .attach("photo", freshPhoto(), { filename: "cat.png", contentType: "image/png" });
+
+            expect(response.status).toBe(400);
+            expect(response.body.error).toContain("only tries dogs");
+        });
+
+        // The docket is the one surface with an audience, so this is the gate on
+        // publication going up. A photo the check will not put on a public page
+        // must not be able to reach it by ticking a box.
+        it("refuses the public record to a photo that cannot be shown in public", async () => {
+            process.env.TEST_PHOTO_IS_SAFE = "false";
+
+            const response = await request(app)
+                .post("/api/cases")
+                .field("public", "true")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+            expect(response.status).toBe(400);
+            expect(response.body.error).toContain("public record");
+        });
+
+        // The other half of that rule, and the half a stricter check would break:
+        // the safety answer decides publication and nothing else. A private case
+        // is the player's own photo shown back to them, so refusing it would be
+        // refusing someone their own picture.
+        it("still tries the case privately when the photo is only unfit for the docket", async () => {
+            process.env.TEST_PHOTO_IS_SAFE = "false";
+
+            const created = await request(app)
+                .post("/api/cases")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+            expect(created.status).toBe(202);
+            await pollUntilReady(created.body.id);
+
+            const docket = await request(app).get("/api/cases/public");
+            const ids = docket.body.map((entry: { id: string }) => entry.id);
+            expect(ids).not.toContain(created.body.id);
+        });
+
+        // The dog answer is not the safety answer: a photo can fail the second
+        // question and still be a dog, and a rewrite that collapses the two would
+        // start turning ordinary uploads away at the door.
+        it("accepts an unpublishable photo that the player never offered to publish", async () => {
+            process.env.TEST_PHOTO_IS_SAFE = "false";
+
+            const response = await request(app)
+                .post("/api/cases")
+                .field("public", "false")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+            expect(response.status).toBe(202);
+        });
     });
 
     // Generation is the whole cost of this app, so the same photo must never be

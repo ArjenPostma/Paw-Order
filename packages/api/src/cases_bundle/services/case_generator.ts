@@ -260,7 +260,18 @@ export function readScreening(value: unknown): PhotoScreening {
 export async function screenPhoto(photo: GeneratedImage): Promise<PhotoScreening> {
     if (resolveAppEnv() === "test") {
         // The suite must never reach Gemini. Same guard shape as r2.ts.
-        return { isDog: true, safeForPublic: true };
+        //
+        // The two knobs are the seam the router's rejections are tested through,
+        // and the only one there is: with a flat `true` here no HTTP test can
+        // produce either 400, so both gates could be deleted from the router and
+        // the suite would stay green - including the one that keeps an
+        // unscreened photo off the front page. Read per call rather than at
+        // module load, so a test can set one for a request and clear it again,
+        // and unreachable outside APP_ENV=test.
+        return {
+            isDog: process.env.TEST_PHOTO_IS_DOG !== "false",
+            safeForPublic: process.env.TEST_PHOTO_IS_SAFE !== "false",
+        };
     }
 
     if (dogChecksInFlight >= MAX_CONCURRENT_DOG_CHECKS) {
