@@ -33,6 +33,7 @@ export function fixtureFacts(): GeneratedFacts {
                 imagePrompt:
                     "The dog from the reference photo sitting beside a collapsed cake, with two sets of pawprints of different sizes crossing the tiles.",
                 imageUrl: null,
+                thumbUrl: null,
                 // Two facts on one exhibit: the scene and the pawprints that
                 // contradict the "only one animal" line. Kept together because
                 // EVIDENCE_COUNT is 3 and both are visible in the same shot.
@@ -46,6 +47,7 @@ export function fixtureFacts(): GeneratedFacts {
                 label: "Frosting on the muzzle",
                 imagePrompt: "Close photograph of the dog from the reference photo, muzzle first.",
                 imageUrl: null,
+                thumbUrl: null,
                 visualFacts: ["white frosting around the dog's mouth"],
             },
             {
@@ -60,6 +62,7 @@ export function fixtureFacts(): GeneratedFacts {
                 imagePrompt:
                     "A round white analogue wall clock in a kitchen, filling the frame and square to the camera, with plain black markers and no numerals. The short hour hand points just past the 2. The long minute hand points at the 4.",
                 imageUrl: null,
+                thumbUrl: null,
                 visualFacts: ["a wall clock showing twenty past two"],
             },
         ],

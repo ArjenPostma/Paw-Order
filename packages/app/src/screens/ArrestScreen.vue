@@ -69,7 +69,7 @@ onMounted(() => headlineRef.value?.focus());
                 </ol>
             </section>
 
-            <button class="enter" type="button" @click="$emit('enter')">Enter court</button>
+            <button class="enter" type="button" @click="$emit('enter')">Begin the defense</button>
         </article>
 
         <!-- The only way off this screen that is not "enter court". A replayed

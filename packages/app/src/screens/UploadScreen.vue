@@ -1,17 +1,27 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onBeforeUnmount, ref } from "vue";
 import type { PlayedCase } from "@/history";
+import { downscale } from "@/image";
 
 // `previous` is a prop, not a localStorage read of this screen's own: dropping a
 // dead case has to update the strip, and remounting this component to re-read it
 // would throw away whatever the player had typed into the name field.
-defineProps<{ error: string | null; previous: PlayedCase[]; opening: string | null }>();
+// `retry` is the photo and name of an attempt the api refused, handed back so a
+// rejected upload does not cost the player their typed name and their file
+// picker trip - this screen is unmounted while the case is generating, so its
+// own state does not survive the round trip.
+const props = defineProps<{
+    error: string | null;
+    previous: PlayedCase[];
+    opening: string | null;
+    retry: { file: File; name: string } | null;
+}>();
 const emit = defineEmits<{ photo: [file: File, name: string]; replay: [id: string] }>();
 
 // Matches MAX_NAME_LENGTH in the api's router, which cuts it again anyway.
 const MAX_NAME_LENGTH = 32;
 
-const name = ref("");
+const name = ref(props.retry?.name ?? "");
 
 // Mirrors what the api accepts. The api re-checks both and stays the authority;
 // this exists because a rejected upload still costs the caller their one
@@ -24,13 +34,37 @@ const dragging = ref(false);
 const rejected = ref<string | null>(null);
 
 /**
+ * The chosen photo, waiting on the player to confirm it. Held here rather than
+ * sent straight up: a generation is one of a very small daily allowance and a
+ * minute of waiting, and the wrong photo dropped by accident used to spend both
+ * before the player saw what they had picked.
+ */
+const pending = ref<{ file: File; url: string } | null>(
+    props.retry ? { file: props.retry.file, url: URL.createObjectURL(props.retry.file) } : null,
+);
+
+/**
+ * True from the confirm until the parent takes over the screen. The confirm
+ * awaits the resize, which is hundreds of milliseconds on a phone photo with the
+ * button still live, and a second click there sends a second upload: the api's
+ * dedupe does not catch it (its read and its insert are not atomic), so one
+ * request wins the per-minute slot and generates a case the client is no longer
+ * listening to, while the other is refused - a whole generation, out of two a
+ * day, spent on a case the player never sees.
+ */
+const booking = ref(false);
+
+/**
  * The one filter both entry points share. `accept="image/*"` constrains the
  * picker's default view and nothing else - a drop bypasses it entirely, and the
  * picker itself lets a determined user switch to "All Files" - so neither path
  * can be trusted to have filtered anything.
  */
 function take(file: File | undefined): void {
-    if (!file) {
+    // Refused while a confirm is in flight: book() captured the held photo
+    // before awaiting the resize, so a swap here would send the old file while
+    // the preview showed the new one.
+    if (!file || booking.value) {
         return;
     }
     if (!ACCEPTED_TYPES.includes(file.type)) {
@@ -42,7 +76,32 @@ function take(file: File | undefined): void {
         return;
     }
     rejected.value = null;
-    emit("photo", file, name.value.trim());
+    // The preview is of what was picked, not of what will be sent: the resize
+    // waits for the confirm, so swapping photos costs no work.
+    replacePending({ file, url: URL.createObjectURL(file) });
+}
+
+/** One place to swap the held photo, so its object URL is always revoked. */
+function replacePending(next: { file: File; url: string } | null): void {
+    if (pending.value) {
+        URL.revokeObjectURL(pending.value.url);
+    }
+    pending.value = next;
+}
+
+onBeforeUnmount(() => {
+    replacePending(null);
+});
+
+async function book(): Promise<void> {
+    const held = pending.value;
+    if (!held || booking.value) {
+        return;
+    }
+    booking.value = true;
+    // Resized here rather than at pick time: the checks in take() are against
+    // the api's own limits, and what the api sees is only ever smaller.
+    emit("photo", await downscale(held.file), name.value.trim());
 }
 
 function onFileChange(event: Event): void {
@@ -98,6 +157,7 @@ function onDrop(event: DragEvent): void {
                 v-model="name"
                 class="named__input"
                 type="text"
+                placeholder="Who's the good boy?"
                 :maxlength="MAX_NAME_LENGTH"
                 autocomplete="off"
             />
@@ -114,11 +174,35 @@ function onDrop(event: DragEvent): void {
         >
             <input class="envelope__input" type="file" accept="image/*" @change="onFileChange" />
             <span class="field-label">Exhibit A &middot; the defendant</span>
-            <span class="envelope__action">Choose a dog photo</span>
+            <!-- The preview IS the picker: the zone keeps every one of its
+                 targets, so a wrong photo is swapped by clicking or dropping
+                 again, with no second control to reach for. -->
+            <!-- Named, not alt="": the preview exists so the player can catch a
+                 wrong photo before it costs a generation, and an empty alt puts
+                 a screen-reader user back where they started. -->
+            <img
+                v-if="pending"
+                class="envelope__preview"
+                :src="pending.url"
+                :alt="`Selected photo: ${pending.file.name}`"
+            />
+            <span class="envelope__action">
+                {{ pending ? "Not this dog?" : "Choose a dog photo" }}
+            </span>
             <span class="envelope__hint">
-                or drop one here &middot; JPG, PNG or WebP, up to 8MB
+                {{
+                    pending
+                        ? "Click or drop another photo to swap"
+                        : "or drop one here · JPG, PNG or WebP, up to 8MB"
+                }}
             </span>
         </label>
+
+        <!-- Outside the label, like the name field and for the same reason: a
+             button inside it would open the file picker instead of booking. -->
+        <button v-if="pending" class="book" type="button" :disabled="booking" @click="book">
+            Enter court
+        </button>
 
         <p v-if="rejected || error" class="upload__error" role="alert">
             {{ rejected ?? error }}
@@ -241,6 +325,11 @@ function onDrop(event: DragEvent): void {
     font-size: 1rem;
 }
 
+/* The browser default is a flat grey that reads as a disabled field on manila. */
+.named__input::placeholder {
+    color: var(--ink-soft);
+}
+
 .named__input:focus-visible {
     outline: 3px solid var(--stamp);
     outline-offset: 2px;
@@ -261,18 +350,6 @@ function onDrop(event: DragEvent): void {
         background 150ms ease,
         border-color 150ms ease,
         transform 150ms ease;
-}
-
-/* The envelope flap: two triangles meeting at the top edge. */
-.envelope::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto;
-    height: 3.5rem;
-    background:
-        linear-gradient(to bottom right, transparent 49.5%, rgb(23 28 38 / 8%) 50%),
-        linear-gradient(to bottom left, transparent 49.5%, rgb(23 28 38 / 8%) 50%);
-    pointer-events: none;
 }
 
 .envelope:hover,
@@ -307,6 +384,45 @@ function onDrop(event: DragEvent): void {
     font-family: var(--transcript);
     font-size: 0.8125rem;
     color: var(--ink-soft);
+}
+
+/* Square and cropped, the way the mugshot on the arrest sheet is: this is the
+   first look at what the file will hold. */
+.envelope__preview {
+    width: 12rem;
+    height: 12rem;
+    object-fit: cover;
+    border: var(--rule);
+    background: var(--paper);
+}
+
+/* The verdict screen's primary action, in the one other place a click costs a
+   generation. */
+.book {
+    width: min(30rem, 100%);
+    padding: 0.9rem 1rem;
+    background: var(--ink);
+    color: var(--paper);
+    border: 2px solid var(--ink);
+    font-family: var(--display);
+    font-size: 0.9375rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    transition:
+        background 150ms ease,
+        border-color 150ms ease,
+        transform 150ms ease;
+}
+
+.book:disabled {
+    background: var(--ink-soft);
+    border-color: var(--ink-soft);
+}
+
+.book:hover:not(:disabled) {
+    background: var(--stamp);
+    border-color: var(--stamp);
+    transform: translateY(-2px);
 }
 
 .upload__error {
@@ -377,8 +493,8 @@ function onDrop(event: DragEvent): void {
     transform: translateY(-2px);
 }
 
-/* Square, matching what the generator now renders. The uploaded photo is not
-   resized anywhere yet, so this crops a full-size original into a 6rem tile. */
+/* Square, matching what the generator now renders: this crops the uploaded
+   photo, capped at 1024px by downscale(), into a 6rem tile. */
 .prior__photo {
     display: block;
     width: 100%;

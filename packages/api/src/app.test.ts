@@ -134,6 +134,11 @@ describe("api wiring", () => {
         for (const exhibit of ready.body.evidence) {
             expect(exhibit.visualFacts.length).toBeGreaterThan(0);
             expect(exhibit.imagePrompt).toBeUndefined();
+            // The other half of the same rule: a field the courtroom needs must
+            // survive the strip. `in`, not a value check - a case generated
+            // before thumbUrl existed carries null here, and the bug this
+            // guards is the key going missing from the wire entirely.
+            expect("thumbUrl" in exhibit).toBe(true);
         }
     });
 

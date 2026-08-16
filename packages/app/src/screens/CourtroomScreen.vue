@@ -34,6 +34,18 @@ const statementRef = ref<HTMLElement | null>(null);
 const lightboxRef = ref<HTMLDialogElement | null>(null);
 const zoomed = ref<PublicEvidence | null>(null);
 
+/**
+ * Starts the full exhibit downloading on hover or focus, so the lightbox opens
+ * on a cached image rather than a cold fetch. The strip only holds the small
+ * copy now, so without this the first thing an opened exhibit shows is nothing.
+ * Only on intent, never up front: a player who opens none should pay for none.
+ */
+function warmExhibit(exhibit: PublicEvidence): void {
+    if (exhibit.imageUrl) {
+        new Image().src = exhibit.imageUrl;
+    }
+}
+
 function openExhibit(exhibit: PublicEvidence): void {
     zoomed.value = exhibit;
     lightboxRef.value?.showModal();
@@ -112,16 +124,8 @@ onMounted(() => statementRef.value?.focus());
                         </li>
                     </ul>
 
-                    <!-- The only way out of the courtroom that does not need a
-                         working turn. Without it a request that never resolves
-                         leaves `turning` true, every choice refusing, and the
-                         "Take another case" button on the verdict screen the
-                         player can no longer reach - so recovery is a reload. -->
                     <p v-if="error" class="examination__error" role="alert">
                         {{ error }}
-                        <button class="examination__bail" type="button" @click="$emit('abandon')">
-                            Abandon this case
-                        </button>
                     </p>
                 </section>
 
@@ -165,10 +169,16 @@ onMounted(() => statementRef.value?.focus());
                                 class="exhibit__open"
                                 type="button"
                                 @click="openExhibit(exhibit)"
+                                @mouseenter="warmExhibit(exhibit)"
+                                @focus="warmExhibit(exhibit)"
                             >
+                                <!-- The strip copy when the generator wrote one;
+                                     cases from before it existed still have only
+                                     the full exhibit. The lightbox below always
+                                     opens the full one. -->
                                 <img
                                     class="exhibit__image"
-                                    :src="exhibit.imageUrl"
+                                    :src="exhibit.thumbUrl ?? exhibit.imageUrl"
                                     :alt="`${exhibit.label}. Enlarge.`"
                                     loading="lazy"
                                 />
@@ -194,6 +204,21 @@ onMounted(() => statementRef.value?.focus());
             </div>
         </div>
 
+        <!-- Same control the arrest sheet carries, in the same place, for the
+             same reason: a run in progress had no way back to the strip except
+             a reload. It is also the way out of a turn that never resolves,
+             which leaves `turning` true and every choice refusing.
+
+             Last in the document, drawn first by order: -1, exactly as on the
+             arrest sheet - focus is moved to the statement on mount and after
+             every turn, so a control placed above it in the DOM is one the
+             player only reaches by tabbing backwards. -->
+        <p class="leave-row">
+            <button class="leave" type="button" @click="$emit('abandon')">
+                &larr; Abandon this case
+            </button>
+        </p>
+
         <dialog ref="lightboxRef" class="lightbox" @click="onLightboxClick" @close="zoomed = null">
             <figure v-if="zoomed" class="lightbox__panel">
                 <img class="lightbox__image" :src="zoomed.imageUrl ?? ''" :alt="zoomed.label" />
@@ -213,8 +238,34 @@ onMounted(() => statementRef.value?.focus());
 .court {
     flex: 1;
     display: flex;
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
     padding: var(--step);
+}
+
+/* Same ghost link the arrest sheet uses, sitting above the page rather than on
+   it: it is a way out of the file, not a move inside it. */
+.leave-row {
+    order: -1;
+    width: min(60rem, 100%);
+    margin: 0 0 0.6rem;
+}
+
+.leave {
+    padding: 0.25rem 0;
+    background: none;
+    border: none;
+    color: var(--ink-soft);
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    transition: color 140ms ease;
+}
+
+.leave:hover {
+    color: var(--ink);
+    text-decoration: underline;
 }
 
 /* The trial is a page in the same case file the arrest and the ruling live in,
@@ -228,7 +279,6 @@ onMounted(() => statementRef.value?.focus());
     border-top: 6px solid var(--ink);
     box-shadow: 0 18px 40px rgb(23 28 38 / 12%);
     padding: clamp(1.25rem, 3vw, 2.25rem);
-    align-self: flex-start;
 }
 
 .caption {
@@ -373,27 +423,6 @@ onMounted(() => statementRef.value?.focus());
     border-left: 3px solid var(--stamp);
     padding-left: 0.75rem;
     margin: 1rem 0 0;
-}
-
-.examination__bail {
-    display: block;
-    margin-top: 0.6rem;
-    padding: 0.5rem 0.9rem;
-    background: transparent;
-    color: var(--ink);
-    border: 1px solid var(--ink);
-    font-family: var(--transcript);
-    font-size: 0.8125rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    transition:
-        background 140ms ease,
-        color 140ms ease;
-}
-
-.examination__bail:hover {
-    background: var(--ink);
-    color: var(--paper);
 }
 
 .rail {

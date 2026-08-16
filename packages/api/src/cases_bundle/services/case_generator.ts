@@ -14,7 +14,7 @@ import {
 } from "@/cases_bundle/services/case_prompt";
 import { validateFacts, validateTree } from "@/cases_bundle/services/case_validator";
 import type { ValidationResult } from "@/cases_bundle/services/case_validator";
-import { uploadImage } from "@/storage/r2";
+import { uploadImage, uploadThumbnail } from "@/storage/r2";
 
 export interface GeneratedCase {
     bible: CaseBible;
@@ -125,8 +125,12 @@ function parseJson(text: string): unknown {
  * one per exhibit. allSettled, not all: a refused or malformed image leaves that
  * exhibit pictureless (Evidence.imageUrl is nullable for exactly this) and the
  * trial still plays. Losing a whole generated case to one flaky call is worse.
+ *
+ * Exported for its test only: generateCaseBible answers the fixture under
+ * APP_ENV=test and never reaches this, so without a seam here the whole
+ * full-plus-thumbnail wiring could be deleted with every test still green.
  */
-async function renderEvidence(
+export async function renderEvidence(
     evidence: Evidence[],
     photo: EncodedImage,
     signal: AbortSignal,
@@ -134,7 +138,12 @@ async function renderEvidence(
     const results = await Promise.allSettled(
         evidence.map(async (exhibit) => {
             const image = await generateImage(exhibit.imagePrompt, photo, signal);
-            return uploadImage(image.bytes, image.mimeType, "evidence", signal);
+            const full = await uploadImage(image.bytes, image.mimeType, "evidence", signal);
+            // Sequential, not concurrent: the resize is CPU work on bytes the
+            // upload above already holds, and every exhibit in the case is
+            // running this same block at once.
+            const thumb = await uploadThumbnail(image.bytes, "evidence", signal);
+            return { full, thumb };
         }),
     );
 
@@ -148,10 +157,14 @@ async function renderEvidence(
             );
             return exhibit;
         }
-        if (result.value.key !== null) {
-            storedKeys.push(result.value.key);
+        const { full, thumb } = result.value;
+        if (full.key !== null) {
+            storedKeys.push(full.key);
         }
-        return { ...exhibit, imageUrl: result.value.url };
+        if (thumb?.key != null) {
+            storedKeys.push(thumb.key);
+        }
+        return { ...exhibit, imageUrl: full.url, thumbUrl: thumb?.url ?? null };
     });
 
     // One pictureless exhibit is a survivable trial. All of them is not a case -
