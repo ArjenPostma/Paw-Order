@@ -81,6 +81,63 @@ describe("api wiring", () => {
         expect(response.status).toBe(400);
     });
 
+    // The name reaches five screens and the whole bible, so both rejections
+    // happen before anything is generated. Mounted ahead of the dog check, so
+    // these cost no model call even in production.
+    it("rejects a defendant name that is a web address", async () => {
+        const response = await request(app)
+            .post("/api/cases")
+            .field("name", "buy-cheap.example.com")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+        expect(response.status).toBe(400);
+        expect(response.body.error).toContain("web address");
+    });
+
+    it("rejects an obscene defendant name, spaced-out spelling included", async () => {
+        const response = await request(app)
+            .post("/api/cases")
+            .field("name", "f u c k e r")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+        expect(response.status).toBe(400);
+        expect(response.body.error).toContain("read that name aloud");
+    });
+
+    it("rejects an obscene name spelled with separators between the letters", async () => {
+        const response = await request(app)
+            .post("/api/cases")
+            .field("name", "f.u.c.k")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+        expect(response.status).toBe(400);
+        expect(response.body.error).toContain("read that name aloud");
+    });
+
+    // The dog most likely to be turned away by mistake: an ordinary name that
+    // contains a banned word as a substring. obscenity's dataset whitelists
+    // these; the test is here so a switch to a flat wordlist fails loudly.
+    it("accepts an ordinary name that contains a banned word", async () => {
+        const response = await request(app)
+            .post("/api/cases")
+            .field("name", "Cassidy")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+        expect(response.status).toBe(202);
+    });
+
+    // The false reject skipNonAlphabeticTransformer caused: it joins across
+    // every space, so a two-word name is checked as one word and the whitelist,
+    // which reads the untransformed string, never sees the joined form.
+    it("accepts a two-word name whose words spell a banned word when joined", async () => {
+        const response = await request(app)
+            .post("/api/cases")
+            .field("name", "Anna Nussbaum")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+        expect(response.status).toBe(202);
+    });
+
     it("accepts an upload without generating inline", async () => {
         const created = await request(app)
             .post("/api/cases")

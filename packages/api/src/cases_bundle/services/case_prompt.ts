@@ -259,6 +259,10 @@ Rules:
 - Exactly ${String(EVIDENCE_COUNT)} exhibits, with ids exactly ${EVIDENCE_IDS.join(", ")}.
 - Exactly ${String(WITNESS_COUNT)} witnesses, with ids exactly ${WITNESS_IDS.join(", ")}.
   At least one witness must be unreliable (reliable: false).
+- A witness name is one first name and nothing else: "Deborah", "Martin". No
+  surname, no title, no "Mrs", no "Officer", no initial. The claims sit in a
+  short list on screen and the player has to tell three people apart at a
+  glance, so give them names that do not start with the same letter.
 
 The exhibits are the important part. Each one becomes a real generated image,
 and the trial is only allowed to talk about what that image actually shows. A
