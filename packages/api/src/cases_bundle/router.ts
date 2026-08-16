@@ -14,7 +14,8 @@ import {
     listPublicCases,
     unpublishCase,
 } from "@/cases_bundle/services/case_service";
-import { DogCheckBusyError, looksLikeDog } from "@/cases_bundle/services/case_generator";
+import type { PhotoScreening } from "@/cases_bundle/services/case_generator";
+import { DogCheckBusyError, screenPhoto } from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
 import { playTurn } from "@/cases_bundle/services/trial_service";
 import { dailyBudget, rateLimit } from "@/http/rate_limit";
@@ -37,6 +38,8 @@ const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
 const NOT_A_DOG = "This court only tries dogs. Try a photo of one.";
+const NOT_PUBLISHABLE =
+    "This photo cannot be entered into the public record. Untick the box to try this case privately.";
 const OBSCENE_NAME = "The court will not read that name aloud. Try the one the dog answers to.";
 const URL_NAME = "That is a web address, not a name.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -347,7 +350,8 @@ const reuseExistingCase: RequestHandler = async (req, res, next) => {
 };
 
 /**
- * Turns away a photo with no dog in it before anything is paid for.
+ * Turns away a photo with no dog in it before anything is paid for, and a photo
+ * that cannot be shown in public when the player asked for the public record.
  *
  * Ahead of both daily ceilings, so a rejected photo spends neither. Behind
  * reuseExistingCase, so a photo already tried in this court is never asked
@@ -356,6 +360,12 @@ const reuseExistingCase: RequestHandler = async (req, res, next) => {
  * Its own cost is bounded by the per-minute limiter above and nothing else -
  * one text call per upload attempt, against ~$0.11 for the generation it stands
  * in front of.
+ *
+ * The safety half is only consulted when the tick box is set. A private case is
+ * seen by the person who uploaded the photo and nobody else, so screening it
+ * would be refusing someone their own picture; the docket is what has an
+ * audience, and the docket is what this guards. It is the gate on publication
+ * going up - takedown (DELETE /link/:slug) is the one for what got through.
  */
 const requireDog: RequestHandler = async (req, res, next) => {
     const file = req.file;
@@ -364,9 +374,9 @@ const requireDog: RequestHandler = async (req, res, next) => {
         return;
     }
 
-    let isDog: boolean;
+    let screening: PhotoScreening;
     try {
-        isDog = await looksLikeDog({ bytes: file.buffer, mimeType: file.mimetype });
+        screening = await screenPhoto({ bytes: file.buffer, mimeType: file.mimetype });
     } catch (error: unknown) {
         // Every check holds the photo and its base64 copy alive while it runs,
         // so the slots are a memory bound, not a cost one. Shedding here is the
@@ -379,11 +389,17 @@ const requireDog: RequestHandler = async (req, res, next) => {
         throw error;
     }
 
-    if (isDog) {
-        next();
+    if (!screening.isDog) {
+        res.status(400).json({ error: NOT_A_DOG });
         return;
     }
-    res.status(400).json({ error: NOT_A_DOG });
+
+    if (wantsPublicRecord(req.body) && !screening.safeForPublic) {
+        res.status(400).json({ error: NOT_PUBLISHABLE });
+        return;
+    }
+
+    next();
 };
 
 export const casesRouter = Router();

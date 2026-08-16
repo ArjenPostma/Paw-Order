@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Evidence } from "@paw-order/shared";
-import { renderEvidence, saysDog } from "@/cases_bundle/services/case_generator";
+import { readScreening, renderEvidence } from "@/cases_bundle/services/case_generator";
 import { uploadImage, uploadThumbnail } from "@/storage/r2";
 import { generateImage } from "@/ai/gemini";
 
@@ -36,35 +36,56 @@ const photo = { base64: "", mimeType: "image/jpeg" };
 
 /**
  * The dog check's answer is a model response, so it is narrowed rather than
- * read. looksLikeDog itself short-circuits under APP_ENV=test and never reaches
+ * read. screenPhoto itself short-circuits under APP_ENV=test and never reaches
  * the model, which leaves this narrowing as the only part of the gate a test
  * can actually execute - and the part where a rewrite would silently start
  * accepting a string, a number or a missing field as "yes".
  */
-describe("saysDog", () => {
-    it("accepts only the boolean true", () => {
-        expect(saysDog({ isDog: true })).toBe(true);
-        expect(saysDog({ isDog: false })).toBe(false);
+describe("readScreening", () => {
+    it("accepts only the boolean true, on both answers", () => {
+        expect(readScreening({ isDog: true, safeForPublic: true })).toEqual({
+            isDog: true,
+            safeForPublic: true,
+        });
+        expect(readScreening({ isDog: false, safeForPublic: false })).toEqual({
+            isDog: false,
+            safeForPublic: false,
+        });
+    });
+
+    it("reads the two answers independently", () => {
+        // The photo that this whole field exists for: a real dog, in a frame
+        // that cannot go on the front page.
+        expect(readScreening({ isDog: true, safeForPublic: false })).toEqual({
+            isDog: true,
+            safeForPublic: false,
+        });
     });
 
     it("refuses a truthy value that is not the boolean", () => {
         // A model that answers with the STRING "false" would otherwise pass:
         // every non-empty string is truthy.
-        expect(saysDog({ isDog: "false" })).toBe(false);
-        expect(saysDog({ isDog: "true" })).toBe(false);
-        expect(saysDog({ isDog: 1 })).toBe(false);
+        expect(readScreening({ isDog: "false", safeForPublic: "false" }).isDog).toBe(false);
+        expect(readScreening({ isDog: "true", safeForPublic: "true" }).safeForPublic).toBe(false);
+        expect(readScreening({ isDog: 1, safeForPublic: 1 })).toEqual({
+            isDog: false,
+            safeForPublic: false,
+        });
     });
 
     it("refuses anything that is not the expected shape", () => {
-        // parseJson answers null for a non-JSON body; looksLikeDog treats that
-        // as a non-answer and falls open before this is ever asked, but the
-        // narrowing must not read it as a yes either.
-        expect(saysDog(null)).toBe(false);
-        expect(saysDog(undefined)).toBe(false);
-        expect(saysDog({})).toBe(false);
-        expect(saysDog([])).toBe(false);
-        expect(saysDog("isDog")).toBe(false);
-        expect(saysDog(true)).toBe(false);
+        // parseJson answers null for a non-JSON body; screenPhoto treats that as
+        // a non-answer and decides both halves itself before this is ever asked,
+        // but the narrowing must not read it as a yes either.
+        for (const value of [null, undefined, {}, [], "isDog", true]) {
+            expect(readScreening(value)).toEqual({ isDog: false, safeForPublic: false });
+        }
+    });
+
+    it("refuses publication for an answer that omits the safety field", () => {
+        // The half that must never fall open: an older or truncated response
+        // that carries only isDog is not permission to publish.
+        expect(readScreening({ isDog: true })).toEqual({ isDog: true, safeForPublic: false });
     });
 });
 

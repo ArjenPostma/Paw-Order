@@ -28,14 +28,18 @@ const NUMBER = { type: Type.NUMBER } as const;
 const STRING = { type: Type.STRING } as const;
 
 /**
- * The gate on the upload, answered before a single paid stage runs. One boolean
+ * The gate on the upload, answered before a single paid stage runs. Two booleans
  * and nothing else: anything the model could write here is thrown away, and a
  * larger schema is a larger response to wait for while the POST is held open.
+ *
+ * `safeForPublic` rides along on the call that was being made anyway rather than
+ * costing a second one. It only decides publication, never whether the case can
+ * be played: a private case is seen by the person who uploaded the photo.
  */
 export const DOG_SCHEMA: Schema = {
     type: Type.OBJECT,
-    required: ["isDog"],
-    properties: { isDog: { type: Type.BOOLEAN } },
+    required: ["isDog", "safeForPublic"],
+    properties: { isDog: { type: Type.BOOLEAN }, safeForPublic: { type: Type.BOOLEAN } },
 };
 
 /**
@@ -48,6 +52,12 @@ export const DOG_SCHEMA: Schema = {
  * Erring the other way costs more than it saves. A false reject is a player
  * turned away from a photo that would have played fine, on the very first
  * screen, with no way to argue; a false accept costs one case's generation.
+ *
+ * safeForPublic is the opposite balance, and deliberately so: a false reject
+ * there only means the player plays their own case privately, while a false
+ * accept puts the image on a page every visitor lands on. It is asked as its own
+ * question because a check written as one ("a nice dog photo?") collapses into
+ * the dog answer, and the dog answer has to stay generous.
  */
 export const DOG_CHECK_PROMPT = `Look at the image. Answer whether there is a dog in it.
 
@@ -70,7 +80,30 @@ dog. Breed accuracy does not matter. Image quality does not matter.
 Answer false only when there is no dog in the image at all: a person on their
 own, a different animal, a place, a meal, an object, a screenshot, or text.
 
-Return {"isDog": true} or {"isDog": false} and nothing else.`;
+Then answer a SECOND, separate question: safeForPublic.
+
+The photo may be shown, whole and uncropped, on the front page of a comedy game
+that anyone can open, including children. safeForPublic is whether the WHOLE
+image is fine there - not just the dog, but everything else in the frame and in
+the background.
+
+Answer safeForPublic false when the image contains any of:
+- nudity, underwear, sexual content, or a sexual pose
+- blood, injury, an animal in distress, cruelty, or a dead animal
+- a slur, hate symbol, or extremist imagery, in the picture or written in it
+- obscene or abusive writing anywhere in the frame
+- a weapon presented as a threat, drugs, or drug use
+- anything else an ordinary person would object to seeing on a family website
+
+Answer safeForPublic true for an ordinary photo of a dog, however scruffy, muddy,
+badly lit, or silly. A person in the frame is fine when they are dressed and
+doing nothing objectionable. Being unflattering is not unsafe.
+
+The two answers are independent: a photo can have a dog in it and still not be
+safe for the public page.
+
+Return {"isDog": true, "safeForPublic": true} with the two answers filled in, and
+nothing else.`;
 const STRING_LIST: Schema = { type: Type.ARRAY, items: { type: Type.STRING } };
 
 export const FACTS_SCHEMA: Schema = {
@@ -234,6 +267,10 @@ Rules:
 - Call the dog by that name, exactly as written. Never invent a different one. If
   the name is "The dog", write "the dog" or "this dog" in running text rather
   than treating it as a proper name.
+- That holds for every witness too. A witness never uses a nickname, a pet name,
+  a shortened form or a spelling of their own for the defendant: they write the
+  name exactly as given, or they say "the dog". A second name for the same animal
+  reads as a second animal, and the player has no way to tell which is which.
 - The crime must be petty, domestic and harmless: stolen food, a destroyed
   cushion, a missing garden gnome. No violence, no injury, no real crime, no
   people harmed, no other animals harmed.
@@ -392,9 +429,12 @@ Design rules:
   credibility but raise suspicion.
 - A bad choice makes the case harder, it never ends the trial early.
 - The prosecutor should be smug, the judge dry. Keep it funny and never cruel.
-- Call the defendant by defendantName above. If it is "The dog", say "the dog" or
-  "this dog" rather than treating it as a proper name. Never say "the reference
-  photo" or "the uploaded photo" - the court is looking at exhibits, not files.
+- Call the defendant by defendantName above, spelled exactly that way, in every
+  statement and every choice. No nickname, no shortened form, no second name a
+  speaker made up: the player reads two names as two dogs. If defendantName is
+  "The dog", say "the dog" or "this dog" rather than treating it as a proper
+  name. Never say "the reference photo" or "the uploaded photo" - the court is
+  looking at exhibits, not files.
 
 Return JSON only.`;
 }

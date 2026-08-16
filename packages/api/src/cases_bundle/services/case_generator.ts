@@ -213,27 +213,54 @@ export class DogCheckBusyError extends Error {
     }
 }
 
-/** The one field DOG_SCHEMA asks for, narrowed off an untrusted response. */
-export function saysDog(value: unknown): boolean {
-    return typeof value === "object" && value !== null && "isDog" in value && value.isDog === true;
+/** What the upload gate answers. Both fields are the model's, both narrowed. */
+export interface PhotoScreening {
+    /** Whether there is a dog in it at all. False turns the upload away. */
+    isDog: boolean;
+    /** Whether the whole frame can go on the docket. False refuses publication. */
+    safeForPublic: boolean;
 }
 
 /**
- * Whether the photo has a dog in it, asked before anything is paid for.
+ * The two fields DOG_SCHEMA asks for, narrowed off an untrusted response.
+ *
+ * The two halves fall opposite ways on a malformed answer, which is the whole
+ * reason this is one function rather than two `=== true` checks: isDog false is
+ * the caller's cue to fall open, and safeForPublic false is already the safe
+ * side, so a model that answers with the string "true" is refused publication
+ * rather than granted it.
+ */
+export function readScreening(value: unknown): PhotoScreening {
+    const answered = typeof value === "object" && value !== null;
+    return {
+        isDog: answered && "isDog" in value && value.isDog === true,
+        safeForPublic: answered && "safeForPublic" in value && value.safeForPublic === true,
+    };
+}
+
+/**
+ * Whether the photo has a dog in it and whether it can be shown in public, both
+ * asked before anything is paid for.
  *
  * One cheap text call against the same photo the exhibits would be rendered
  * from. It is the only guard between an anonymous upload and four paid calls,
  * and the router mounts it ahead of both daily ceilings so a rejected photo
  * spends neither.
  *
- * Fails OPEN. A model outage here would otherwise turn every upload away at the
- * door, and it costs nothing to let one through: if Gemini is down, the facts
- * stage is the next thing to run and it fails before an image is ever rendered.
+ * isDog fails OPEN. A model outage here would otherwise turn every upload away
+ * at the door, and it costs nothing to let one through: if Gemini is down, the
+ * facts stage is the next thing to run and it fails before an image is ever
+ * rendered.
+ *
+ * safeForPublic fails CLOSED, on the same non-answers. An unscreened photo must
+ * not reach the front page, and refusing it costs the player only the tick box -
+ * the case itself still generates and still plays. During the outage that makes
+ * isDog fall open, nothing reaches READY anyway, so there is no case to publish.
  */
-export async function looksLikeDog(photo: GeneratedImage): Promise<boolean> {
+export async function screenPhoto(photo: GeneratedImage): Promise<PhotoScreening> {
     if (resolveAppEnv() === "test") {
         // The suite must never reach Gemini. Same guard shape as r2.ts.
-        return true;
+        return { isDog: true, safeForPublic: true };
     }
 
     if (dogChecksInFlight >= MAX_CONCURRENT_DOG_CHECKS) {
@@ -253,17 +280,17 @@ export async function looksLikeDog(photo: GeneratedImage): Promise<boolean> {
             // would tell a player holding a real dog that it is not a dog, which
             // is the one outcome DOG_CHECK_PROMPT is written to avoid.
             console.warn(
-                `[paw-order-api] dog check answered with ${String(text.length)} chars of non-JSON, letting the upload through`,
+                `[paw-order-api] dog check answered with ${String(text.length)} chars of non-JSON, letting the upload through unpublished`,
             );
-            return true;
+            return { isDog: true, safeForPublic: false };
         }
-        return saysDog(parsed);
+        return readScreening(parsed);
     } catch (error: unknown) {
         console.error(
-            `[paw-order-api] dog check did not answer (model=${TEXT_MODEL}), letting the upload through`,
+            `[paw-order-api] dog check did not answer (model=${TEXT_MODEL}), letting the upload through unpublished`,
             error,
         );
-        return true;
+        return { isDog: true, safeForPublic: false };
     } finally {
         dogChecksInFlight -= 1;
     }

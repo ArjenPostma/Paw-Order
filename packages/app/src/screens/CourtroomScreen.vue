@@ -83,52 +83,122 @@ onMounted(() => statementRef.value?.focus());
             </header>
 
             <div class="page">
-                <!-- ONE live region, always mounted. A region only announces
-                     when it was already in the accessibility tree before its
-                     content changed, so moving this onto the swapped blocks
-                     silences it. -->
-                <section class="examination" aria-live="polite">
-                    <p class="examination__marker">
-                        <span class="examination__q">Q.{{ question }}</span>
-                        {{ SPEAKER_NAMES[node.speaker] }}
-                    </p>
+                <!-- The questioning and the exhibits, in that order, as one
+                     column: the exhibits belong under the responses the player
+                     is choosing between, not under whichever of the two columns
+                     ran longer. -->
+                <div class="column">
+                    <!-- ONE live region, always mounted. A region only announces
+                         when it was already in the accessibility tree before its
+                         content changed, so moving this onto the swapped blocks
+                         silences it. -->
+                    <section class="examination" aria-live="polite">
+                        <p class="examination__marker">
+                            <span class="examination__q">Q.{{ question }}</span>
+                            {{ SPEAKER_NAMES[node.speaker] }}
+                        </p>
 
-                    <!-- tabindex -1 so focus can be moved here after each turn;
-                         it is not in the tab order itself. -->
-                    <p ref="statementRef" class="examination__statement" tabindex="-1">
-                        {{ node.statement }}
-                    </p>
+                        <!-- The frame holds the reserved five lines and does the
+                             scrolling; the statement inside it is only as tall
+                             as what was said, so the red rule beside it measures
+                             the speech rather than the reservation.
 
-                    <p class="examination__cue">
-                        {{ turning ? "The court is considering" : "Counsel responds" }}
-                    </p>
+                             tabindex -1 on the frame, not the statement: focus
+                             is moved here after each turn and it is the frame
+                             that scrolls, so this is what arrow keys must act
+                             on. It is not in the tab order itself. -->
+                        <div ref="statementRef" class="examination__frame" tabindex="-1">
+                            <p class="examination__statement">{{ node.statement }}</p>
+                        </div>
 
-                    <ul class="responses" aria-label="Respond">
-                        <!-- Keyed by position because the index IS the
-                             identifier the api takes back: choices carry no id
-                             of their own. -->
-                        <li v-for="(choice, index) in node.choices" :key="`${node.id}-${index}`">
-                            <!-- aria-disabled, not disabled: a disabled button
-                                 leaves the tab order and the accessibility tree
-                                 entirely, so an in-flight turn reads as the
-                                 controls vanishing. The parent already refuses
-                                 a second turn while one is running. -->
-                            <button
-                                class="response"
-                                type="button"
-                                :aria-disabled="turning"
-                                @click="$emit('choose', index)"
+                        <p class="examination__cue">
+                            {{ turning ? "The court is considering" : "Counsel responds" }}
+                        </p>
+
+                        <ul class="responses" aria-label="Respond">
+                            <!-- Keyed by position because the index IS the
+                                 identifier the api takes back: choices carry no
+                                 id of their own. -->
+                            <li
+                                v-for="(choice, index) in node.choices"
+                                :key="`${node.id}-${index}`"
                             >
-                                <span class="response__box" aria-hidden="true"></span>
-                                <span class="response__text">{{ choice.text }}</span>
-                            </button>
-                        </li>
-                    </ul>
+                                <!-- aria-disabled, not disabled: a disabled
+                                     button leaves the tab order and the
+                                     accessibility tree entirely, so an in-flight
+                                     turn reads as the controls vanishing. The
+                                     parent already refuses a second turn while
+                                     one is running. -->
+                                <button
+                                    class="response"
+                                    type="button"
+                                    :aria-disabled="turning"
+                                    @click="$emit('choose', index)"
+                                >
+                                    <span class="response__box" aria-hidden="true"></span>
+                                    <span class="response__text">{{ choice.text }}</span>
+                                </button>
+                            </li>
+                        </ul>
 
-                    <p v-if="error" class="examination__error" role="alert">
-                        {{ error }}
-                    </p>
-                </section>
+                        <p v-if="error" class="examination__error" role="alert">
+                            {{ error }}
+                        </p>
+                    </section>
+
+                    <!-- Laid out along a row the way exhibits are laid along the
+                         front of a bench: the player compares them against each
+                         other, which a vertical column made awkward. Only what
+                         the trial has put in play - shipping all three up front
+                         let a player read the clock against a witness claim and
+                         work out who was lying before question one. -->
+                    <section class="evidence">
+                        <h2 class="field-label evidence__title">Exhibits</h2>
+                        <p v-if="exhibits.length === 0" class="evidence__empty">
+                            Nothing entered into evidence yet.
+                        </p>
+                        <div v-else class="evidence__strip">
+                            <figure v-for="exhibit in exhibits" :key="exhibit.id" class="exhibit">
+                                <span class="exhibit__tape" aria-hidden="true"></span>
+                                <button
+                                    v-if="exhibit.imageUrl"
+                                    class="exhibit__open"
+                                    type="button"
+                                    @click="openExhibit(exhibit)"
+                                    @mouseenter="warmExhibit(exhibit)"
+                                    @focus="warmExhibit(exhibit)"
+                                >
+                                    <!-- The strip copy when the generator wrote
+                                         one; cases from before it existed still
+                                         have only the full exhibit. The lightbox
+                                         below always opens the full one. -->
+                                    <img
+                                        class="exhibit__image"
+                                        :src="exhibit.thumbUrl ?? exhibit.imageUrl"
+                                        :alt="`${exhibit.label}. Enlarge.`"
+                                        loading="lazy"
+                                    />
+                                </button>
+                                <figcaption class="exhibit__caption">
+                                    <span class="exhibit__tag">{{ exhibit.id }}</span>
+                                    {{ exhibit.label }}
+                                    <ul class="exhibit__facts">
+                                        <!-- Keyed by position: visualFacts is
+                                             model output with no uniqueness
+                                             constraint, and two identical
+                                             entries collide. -->
+                                        <li
+                                            v-for="(fact, index) in exhibit.visualFacts"
+                                            :key="`${exhibit.id}-${index}`"
+                                        >
+                                            {{ fact }}
+                                        </li>
+                                    </ul>
+                                </figcaption>
+                            </figure>
+                        </div>
+                    </section>
+                </div>
 
                 <aside class="rail">
                     <h2 class="field-label rail__title">Witnesses</h2>
@@ -151,58 +221,6 @@ onMounted(() => statementRef.value?.focus());
                     </h2>
                     <CaseTimeline :entries="timeline" />
                 </aside>
-
-                <!-- Laid out along the bottom of the page the way exhibits are
-                     laid along the front of a bench: the player compares them
-                     against each other, which a vertical column made awkward.
-                     Only what the trial has put in play - shipping all three up
-                     front let a player read the clock against a witness claim
-                     and work out who was lying before question one. -->
-                <section class="evidence">
-                    <h2 class="field-label evidence__title">Exhibits</h2>
-                    <p v-if="exhibits.length === 0" class="evidence__empty">
-                        Nothing entered into evidence yet.
-                    </p>
-                    <div v-else class="evidence__strip">
-                        <figure v-for="exhibit in exhibits" :key="exhibit.id" class="exhibit">
-                            <span class="exhibit__tape" aria-hidden="true"></span>
-                            <button
-                                v-if="exhibit.imageUrl"
-                                class="exhibit__open"
-                                type="button"
-                                @click="openExhibit(exhibit)"
-                                @mouseenter="warmExhibit(exhibit)"
-                                @focus="warmExhibit(exhibit)"
-                            >
-                                <!-- The strip copy when the generator wrote one;
-                                     cases from before it existed still have only
-                                     the full exhibit. The lightbox below always
-                                     opens the full one. -->
-                                <img
-                                    class="exhibit__image"
-                                    :src="exhibit.thumbUrl ?? exhibit.imageUrl"
-                                    :alt="`${exhibit.label}. Enlarge.`"
-                                    loading="lazy"
-                                />
-                            </button>
-                            <figcaption class="exhibit__caption">
-                                <span class="exhibit__tag">{{ exhibit.id }}</span>
-                                {{ exhibit.label }}
-                                <ul class="exhibit__facts">
-                                    <!-- Keyed by position: visualFacts is model
-                                         output with no uniqueness constraint,
-                                         and two identical entries collide. -->
-                                    <li
-                                        v-for="(fact, index) in exhibit.visualFacts"
-                                        :key="`${exhibit.id}-${index}`"
-                                    >
-                                        {{ fact }}
-                                    </li>
-                                </ul>
-                            </figcaption>
-                        </figure>
-                    </div>
-                </section>
             </div>
         </div>
 
@@ -319,6 +337,22 @@ onMounted(() => statementRef.value?.focus());
     padding-top: 1.5rem;
 }
 
+/* The questioning and the exhibits are ONE cell, stacked, not two grid rows.
+   As rows they were sized alongside the rail, and the rail is almost always the
+   taller column - three long witness statements over a six entry timeline - so
+   the exhibits were pushed down past a screen of blank paper to clear it. In
+   one cell the rail's length cannot move them: they sit under the responses
+   whatever the witnesses had to say. */
+.column {
+    display: flex;
+    flex-direction: column;
+    /* Vertical rhythm inside the sheet, not the grid's column gap. */
+    gap: 1.5rem;
+    /* Without this a wide exhibit strip widens the column instead of scrolling
+       inside it, and the rail is squeezed to nothing. */
+    min-width: 0;
+}
+
 .examination__marker {
     display: flex;
     align-items: baseline;
@@ -341,18 +375,40 @@ onMounted(() => statementRef.value?.focus());
     padding: 0.1rem 0.4rem;
 }
 
-/* The voice the player is listening to gets the largest type on the page. */
-.examination__statement {
+/* The reservation, and nothing else: five lines held open whoever is speaking.
+   Together with the reserved third response below it is what holds the exhibits
+   at one height for the whole trial - a two-line witness followed by a six-line
+   prosecutor moved the strip under the player mid-comparison, and comparing
+   those photographs is the game. Nothing is cut: the rare statement that runs
+   past five lines scrolls in here, which is the price of the strip standing
+   still.
+
+   It carries the type scale rather than the statement inside it, so the em
+   height below is five lines of the size actually rendered. */
+.examination__frame {
     font-family: var(--transcript);
     font-size: clamp(1.125rem, 0.95rem + 0.9vw, 1.5rem);
     line-height: 1.5;
+    height: 7.5em;
+    overflow-y: auto;
+    /* The gutter is there whether that statement scrolls or not, so the line
+       breaks do not move between one question and the next. */
+    scrollbar-gutter: stable;
     margin: 0 0 2rem;
-    padding-left: 1.1rem;
-    border-left: 3px solid var(--stamp);
 }
 
-.examination__statement:focus {
+.examination__frame:focus {
     outline: none;
+}
+
+/* The voice the player is listening to gets the largest type on the page. Its
+   own height is the height of the speech: the rule down the left marks what was
+   said, and drawing it the full height of the frame would have it measuring
+   blank paper the speaker never used. */
+.examination__statement {
+    margin: 0;
+    padding-left: 1.1rem;
+    border-left: 3px solid var(--stamp);
 }
 
 .examination__cue {
@@ -364,11 +420,25 @@ onMounted(() => statementRef.value?.focus());
     margin: 0 0 0.75rem;
 }
 
+/* Three slots, always, because the generator is told to write two or three
+   choices (case_prompt.ts) and a node with two must not pull the exhibits up
+   under it. The third row is empty paper when it is unused.
+
+   13rem is three 4rem rows and the two gaps between them, against the 3.18rem a
+   single-line response actually occupies: most are a sentence and wrap to two
+   lines on a narrower page, so a reservation sized to the shortest possible
+   response runs out exactly when it is needed. Held as one min-height rather
+   than three tall rows, with align-content start, so the options stay tight
+   together at the top and the slack collects underneath as blank paper - the
+   same shape as the statement frame above. Longer responses, or a fourth choice
+   the validator permits, grow the list past it. */
 .responses {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
+    align-content: start;
+    min-height: 13rem;
     gap: 0.5rem;
 }
 
@@ -478,7 +548,6 @@ onMounted(() => statementRef.value?.focus());
 }
 
 .evidence {
-    grid-column: 1 / -1;
     border-top: var(--rule);
     padding-top: 1.25rem;
 }
@@ -505,10 +574,14 @@ onMounted(() => statementRef.value?.focus());
     padding: 0.75rem 0 0.5rem;
 }
 
-/* Exhibits are photographs taped into the file, so they sit slightly askew. */
+/* Exhibits are photographs taped into the file, so they sit slightly askew.
+   11.5rem, not the 13.5rem this was when the strip ran the full width of the
+   sheet: the column it sits in now is the narrower one, and three tiles have to
+   fit it side by side without scrolling. The lightbox is still where a clock
+   face gets read. */
 .exhibit {
     position: relative;
-    flex: 0 0 13.5rem;
+    flex: 0 0 11.5rem;
     margin: 0;
     padding: 0.5rem 0.5rem 0.6rem;
     background: rgb(255 255 255 / 45%);
@@ -533,10 +606,13 @@ onMounted(() => statementRef.value?.focus());
     border-right: 1px solid rgb(201 162 39 / 75%);
 }
 
+/* Opacity only. Animating the tile in from rotate(-4deg) translateY(10px) swung
+   its corners outside the strip for the length of the animation - the strip is
+   an overflow container, so both scrollbars appeared for that moment and then
+   went away again as the tile settled. A fade cannot overflow anything. */
 @keyframes exhibit-in {
     from {
         opacity: 0;
-        transform: rotate(-4deg) translateY(10px);
     }
 }
 
