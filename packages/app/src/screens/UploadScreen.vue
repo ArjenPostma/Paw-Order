@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
+import type { PublicCaseSummary } from "@paw-order/shared";
 import type { PlayedCase } from "@/history";
 import { downscale } from "@/image";
 
@@ -13,15 +14,38 @@ import { downscale } from "@/image";
 const props = defineProps<{
     error: string | null;
     previous: PlayedCase[];
+    others: PublicCaseSummary[];
     opening: string | null;
-    retry: { file: File; name: string } | null;
+    retry: { file: File; name: string; isPublic: boolean } | null;
 }>();
-const emit = defineEmits<{ photo: [file: File, name: string]; replay: [id: string] }>();
+const emit = defineEmits<{
+    photo: [file: File, name: string, isPublic: boolean];
+    replay: [id: string];
+}>();
 
 // Matches MAX_NAME_LENGTH in the api's router, which cuts it again anyway.
 const MAX_NAME_LENGTH = 32;
 
 const name = ref(props.retry?.name ?? "");
+/**
+ * Whether this case goes into the public record. Private unless the player says
+ * otherwise, and fixed at upload: the api has no route that changes it later,
+ * so the box is the only moment this is decided.
+ */
+const publicRecord = ref(props.retry?.isPublic ?? false);
+
+/**
+ * The two case strips along the bottom, their own always first. One tile
+ * renders both: a docket entry carries exactly the fields a stored case does.
+ * Empty strips are dropped here rather than with a v-if on the section, which
+ * cannot see the loop variable.
+ */
+const strips = computed(() =>
+    [
+        { key: "mine", heading: "Your cases", cases: props.previous },
+        { key: "public", heading: "Other cases", cases: props.others },
+    ].filter((strip) => strip.cases.length > 0),
+);
 
 // Mirrors what the api accepts. The api re-checks both and stays the authority;
 // this exists because a rejected upload still costs the caller their one
@@ -101,7 +125,7 @@ async function book(): Promise<void> {
     booking.value = true;
     // Resized here rather than at pick time: the checks in take() are against
     // the api's own limits, and what the api sees is only ever smaller.
-    emit("photo", await downscale(held.file), name.value.trim());
+    emit("photo", await downscale(held.file), name.value.trim(), publicRecord.value);
 }
 
 function onFileChange(event: Event): void {
@@ -198,6 +222,20 @@ function onDrop(event: DragEvent): void {
             </span>
         </label>
 
+        <!-- With the confirm, not with the name field: this is a decision about
+             a case that does not exist yet, and it is fixed the moment the
+             button below is pressed. Outside the envelope's label like every
+             other control here - inside it, a click would open the picker. -->
+        <label v-if="pending" class="record">
+            <input v-model="publicRecord" class="record__box" type="checkbox" />
+            <span class="record__text">
+                <span class="record__label">Enter into the public record</span>
+                <span class="record__hint">
+                    Other visitors can open this case and defend your dog.
+                </span>
+            </span>
+        </label>
+
         <!-- Outside the label, like the name field and for the same reason: a
              button inside it would open the file picker instead of booking. -->
         <button v-if="pending" class="book" type="button" :disabled="booking" @click="book">
@@ -209,20 +247,22 @@ function onDrop(event: DragEvent): void {
         </p>
 
         <!-- Replaying costs no generation, so the way back to a case already
-             paid for belongs on the same screen as the way to a new one. -->
-        <section v-if="previous.length > 0" class="prior">
-            <h2 class="field-label">Cases on file</h2>
+             paid for belongs on the same screen as the way to a new one - and
+             the same is true of a case someone else paid for. -->
+        <section v-for="strip in strips" :key="strip.key" class="prior">
+            <h2 class="field-label">{{ strip.heading }}</h2>
 
             <!-- Always mounted, so it can announce: a live region only speaks
                  when it was already in the accessibility tree before its text
                  changed. Usually blank, because a replay is usually a cache
-                 revalidation and over before it is read. -->
+                 revalidation and over before it is read. Only the strip holding
+                 the case being opened says anything. -->
             <p class="prior__status" aria-live="polite">
-                {{ opening ? "Pulling the file" : "" }}
+                {{ strip.cases.some((entry) => entry.id === opening) ? "Pulling the file" : "" }}
             </p>
 
             <ul class="prior__strip">
-                <li v-for="played in previous" :key="played.id">
+                <li v-for="played in strip.cases" :key="played.id">
                     <!-- Not disabled while one is opening: a second click is
                          safe (App.vue's run counter supersedes the first fetch
                          rather than racing it), and disabling would drop the
@@ -259,7 +299,6 @@ function onDrop(event: DragEvent): void {
 
 <style scoped>
 .upload {
-    position: relative;
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -270,12 +309,12 @@ function onDrop(event: DragEvent): void {
     text-align: center;
 }
 
+/* In the column, not pinned to the top of it. Absolutely positioned it took no
+   space, so as soon as the page grew past the viewport - which the checkbox and
+   the second case strip both do - the centred content slid up underneath it and
+   the title printed over the line. */
 .upload__docket {
-    position: absolute;
-    top: var(--step);
-    left: 50%;
-    transform: translateX(-50%);
-    margin: 0;
+    margin: 0 0 0.25rem;
 }
 
 .upload__title {
@@ -394,6 +433,49 @@ function onDrop(event: DragEvent): void {
     object-fit: cover;
     border: var(--rule);
     background: var(--paper);
+}
+
+/* A line the player initials before the case is filed, set against the envelope
+   above it rather than as a form row on a page. */
+.record {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    width: min(30rem, 100%);
+    padding: 0.6rem 0.75rem;
+    background: var(--paper-shade);
+    border: 1px solid var(--paper-edge);
+    text-align: left;
+    cursor: pointer;
+}
+
+/* Native, restyled only where it clashes: the platform checkbox already has the
+   keyboard behaviour, the indeterminate-free semantics and the focus ring. */
+.record__box {
+    flex: none;
+    width: 1.1rem;
+    height: 1.1rem;
+    margin-top: 0.1rem;
+    accent-color: var(--stamp);
+}
+
+.record__text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.record__label {
+    font-family: var(--display);
+    font-size: 0.9375rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.record__hint {
+    font-family: var(--transcript);
+    font-size: 0.8125rem;
+    color: var(--ink-soft);
 }
 
 /* The verdict screen's primary action, in the one other place a click costs a
@@ -524,12 +606,5 @@ function onDrop(event: DragEvent): void {
     font-size: 0.75rem;
     line-height: 1.3;
     color: var(--ink-soft);
-}
-
-@media (max-height: 40rem) {
-    .upload__docket {
-        position: static;
-        transform: none;
-    }
 }
 </style>

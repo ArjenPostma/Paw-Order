@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from "vue";
 import type { PublicEvidence, PublicTrialNode, PublicWitness } from "@paw-order/shared";
+import CaseTimeline from "@/components/CaseTimeline.vue";
 
 const props = defineProps<{
     node: PublicTrialNode;
@@ -131,10 +132,15 @@ onMounted(() => statementRef.value?.focus());
 
                 <aside class="rail">
                     <h2 class="field-label rail__title">Witnesses</h2>
-                    <p v-for="witness in witnesses" :key="witness.id" class="witness">
-                        <span class="witness__name">{{ witness.name }}</span>
-                        {{ witness.claim }}
-                    </p>
+                    <!-- One card per statement, each with its own name plate.
+                         As paragraphs these ran into the timeline below them,
+                         and telling two witnesses apart is the whole job of
+                         this rail: the contradiction the player is hunting is
+                         between one of these and a clock. -->
+                    <article v-for="witness in witnesses" :key="witness.id" class="witness">
+                        <h3 class="witness__name">{{ witness.name }}</h3>
+                        <p class="witness__claim">{{ witness.claim }}</p>
+                    </article>
 
                     <!-- Same list the arrest sheet showed, kept in reach: the
                          contradiction a player is hunting is usually between a
@@ -143,11 +149,7 @@ onMounted(() => statementRef.value?.focus());
                     <h2 class="field-label rail__title rail__title--second">
                         The prosecution's timeline
                     </h2>
-                    <ol class="rail__timeline">
-                        <!-- Keyed by position, as on the arrest sheet: model
-                             prose with no uniqueness constraint. -->
-                        <li v-for="(entry, index) in timeline" :key="`t${index}`">{{ entry }}</li>
-                    </ol>
+                    <CaseTimeline :entries="timeline" />
                 </aside>
 
                 <!-- Laid out along the bottom of the page the way exhibits are
@@ -428,6 +430,9 @@ onMounted(() => statementRef.value?.focus());
 .rail {
     border-left: var(--rule);
     padding-left: clamp(1rem, 2vw, 1.5rem);
+    /* The narrow column, so everything in it is set smaller than the same
+       material is on the arrest sheet. CaseTimeline inherits this. */
+    font-size: 0.8125rem;
 }
 
 .rail__title {
@@ -442,35 +447,34 @@ onMounted(() => statementRef.value?.focus());
     border-top: var(--rule);
 }
 
-.rail__timeline {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: 0.25rem;
-    font-family: var(--transcript);
-    font-size: 0.8125rem;
-    line-height: 1.45;
-    color: var(--ink-soft);
-}
-
-.rail__timeline li {
-    padding-left: 0.75rem;
-    border-left: 2px solid var(--tape);
-}
-
+/* One statement, filed. The plate is what separates two witnesses at a glance,
+   which a bold first line was not doing. */
 .witness {
+    background: var(--paper-shade);
+    border: 1px solid var(--paper-edge);
+    margin: 0 0 0.6rem;
+}
+
+.witness__name {
+    margin: 0;
+    padding: 0.3rem 0.5rem;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--display);
+    font-size: 0.6875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    /* Long names wrap inside the plate rather than widening the rail. */
+    overflow-wrap: anywhere;
+}
+
+.witness__claim {
+    margin: 0;
+    padding: 0.5rem;
     font-family: var(--transcript);
     font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--ink-soft);
-    margin: 0 0 0.75rem;
-}
-
-.witness__name {
-    display: block;
-    color: var(--ink);
-    font-weight: 700;
 }
 
 .evidence {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import type { PublicEvidence, Truth, Verdict } from "@paw-order/shared";
+import ShareLink from "@/components/ShareLink.vue";
 
 const props = defineProps<{
     verdict: Verdict;
@@ -8,6 +9,8 @@ const props = defineProps<{
     truth: Truth;
     exhibits: PublicEvidence[];
     defendantName: string;
+    /** Null when the case was not entered into the public record: no link. */
+    slug: string | null;
 }>();
 defineEmits<{ again: []; newCase: [] }>();
 
@@ -99,6 +102,13 @@ onMounted(() => headlineRef.value?.focus());
                     Argue this one again
                 </button>
             </div>
+
+            <!-- Below the two buttons, not among them: sharing is not another
+                 way to keep playing. The link is to the case, so whoever opens
+                 it gets their own trial and their own verdict. -->
+            <p v-if="slug" class="share-row">
+                <ShareLink :slug="slug" />
+            </p>
         </article>
     </main>
 </template>
@@ -229,6 +239,10 @@ onMounted(() => headlineRef.value?.focus());
     display: flex;
     flex-wrap: wrap;
     gap: 0.75rem;
+}
+
+.share-row {
+    margin: 0.75rem 0 0;
 }
 
 .actions__primary,

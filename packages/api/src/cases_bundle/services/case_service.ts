@@ -1,5 +1,11 @@
+import { randomBytes } from "node:crypto";
 import { LessThan, MoreThan } from "typeorm";
-import type { CaseAccepted, CaseBible, CaseStatusResponse } from "@paw-order/shared";
+import type {
+    CaseAccepted,
+    CaseBible,
+    CaseStatusResponse,
+    PublicCaseSummary,
+} from "@paw-order/shared";
 import { publicEvidence, publicNode, publicWitness } from "@paw-order/shared";
 import type { GeneratedImage } from "@/ai/gemini";
 import { positiveIntEnv } from "@/config/env";
@@ -31,6 +37,20 @@ const TIMEOUT_MS = positiveIntEnv("GENERATION_TIMEOUT_MS", 120_000);
 const RETENTION_MS = positiveIntEnv("CASE_RETENTION_DAYS", 365) * 24 * 60 * 60 * 1000;
 /** How often the retention sweep runs. A container can outlive many windows. */
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How many cases the public docket serves. A strip along the bottom of the home
+ * page, the same as the player's own, not an archive - and the ceiling on what
+ * one request costs, since every row read here parses a whole bible.
+ */
+const PUBLIC_DOCKET_SIZE = 12;
+/**
+ * How much of the case title a slug carries. Long enough for a whole title in
+ * most cases, short enough that the url still pastes into a message on one
+ * line.
+ */
+const SLUG_TEXT_MAX = 40;
+/** Fresh random tail per attempt. Three clashes in a row is not luck. */
+const SLUG_ATTEMPTS = 3;
 
 let inFlight = 0;
 
@@ -101,6 +121,7 @@ export async function createCase(
     photo: GeneratedImage,
     defendantName: string,
     photoHash: string | null,
+    isPublic: boolean,
 ): Promise<CaseAccepted> {
     if (inFlight >= MAX_CONCURRENT) {
         throw new GenerationBusyError();
@@ -108,10 +129,10 @@ export async function createCase(
     inFlight += 1;
 
     try {
-        const pending = await insertPendingCase(photo, photoHash);
+        const pending = await insertPendingCase(photo, photoHash, isPublic);
         // Deliberately not awaited: the response goes out now. runGeneration owns
         // the slot from here and never rejects.
-        void runGeneration(pending.id, pending.photoUrl, photo, defendantName);
+        void runGeneration(pending.id, pending.photoUrl, photo, defendantName, isPublic);
         return { id: pending.id, status: "PENDING" };
     } catch (error: unknown) {
         // Only insertPendingCase can land here; runGeneration is not awaited.
@@ -128,6 +149,12 @@ export async function createCase(
  * generation already running for those exact bytes rather than start a second
  * one. FAILED deliberately does not - re-uploading a photo whose case fell apart
  * is the player retrying, and they must get a real attempt.
+ *
+ * isPublic is deliberately not part of the match, and a hit does not change it.
+ * Someone uploading a byte-identical photo under the identical name to a case
+ * already generated privately is handed that case, and their checkbox does
+ * nothing. The alternative is publishing a row on the say-so of a second caller
+ * who only proved they hold the same file, which is worse than a rare no-op.
  */
 export async function findReusableCase(photoHash: string): Promise<CaseAccepted | null> {
     const entity = await repository().findOne({
@@ -153,9 +180,63 @@ export async function findReusableCase(photoHash: string): Promise<CaseAccepted 
     return entity ? { id: entity.id, status: entity.status } : null;
 }
 
+/**
+ * The readable half of a slug: lowercase, url characters only.
+ *
+ * Built from the case TITLE, not the defendant's name. The title is what the
+ * link is about, and a player's own name for their dog is a more personal thing
+ * to put in a url that gets pasted around than the-great-birthday-cake-heist.
+ *
+ * Accents are decomposed and their marks dropped, so "Café" is "cafe" rather
+ * than "caf". A title past the budget is cut at a word rather than mid-word.
+ * One with nothing left after all that - a title written in a script this keeps
+ * none of - falls back to "case"; the six hex that follow are what actually
+ * identify the row, the words are only there so the link reads like something.
+ *
+ * Exported for its own test: the fixture has one title, so the cut and the
+ * fallback are unreachable through the HTTP suite.
+ */
+export function slugStem(title: string): string {
+    const cleaned = title
+        .toLowerCase()
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    if (cleaned.length <= SLUG_TEXT_MAX) {
+        return cleaned || "case";
+    }
+    const cut = cleaned.slice(0, SLUG_TEXT_MAX);
+    const lastWord = cut.lastIndexOf("-");
+    // > 0, not >= 0: a single word longer than the budget has no hyphen to cut
+    // back to, and cutting at index 0 would leave nothing at all.
+    return (lastWord > 0 ? cut.slice(0, lastWord) : cut).replace(/-+$/, "") || "case";
+}
+
+/**
+ * A slug no case is using. Checked rather than constrained: see the note on the
+ * column. The check and the write are not atomic, and nothing here pretends
+ * otherwise - two cases colliding on the same title AND the same six hex in the
+ * same instant is not a race worth a transaction.
+ */
+async function generateSlug(title: string): Promise<string> {
+    const stem = slugStem(title);
+    for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt += 1) {
+        const candidate = `${stem}-${randomBytes(3).toString("hex")}`;
+        if (!(await repository().existsBy({ slug: candidate }))) {
+            return candidate;
+        }
+    }
+    // Three clashes against 16.7 million per title means the random source is
+    // broken, not that the player is unlucky. A longer tail is cheaper than
+    // failing a case whose images are already paid for.
+    return `${stem}-${randomBytes(6).toString("hex")}`;
+}
+
 async function insertPendingCase(
     photo: GeneratedImage,
     photoHash: string | null,
+    isPublic: boolean,
 ): Promise<{ id: string; photoUrl: string }> {
     const stored = await uploadImage(photo.bytes, photo.mimeType, "dogs");
     try {
@@ -164,6 +245,12 @@ async function insertPendingCase(
                 status: "PENDING",
                 bible: placeholderBible(stored.url),
                 photoHash,
+                isPublic,
+                // The slug is written with the bible, not here: it is built
+                // from the case title, which does not exist until the
+                // generator has run. A row that never gets that far keeps the
+                // null it was inserted with, and a case with no slug has no
+                // link - which is the same state a private case is in.
             }),
         );
         return { id: saved.id, photoUrl: stored.url };
@@ -284,6 +371,7 @@ async function runGeneration(
     photoUrl: string,
     photo: GeneratedImage,
     defendantName: string,
+    isPublic: boolean,
 ): Promise<void> {
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -298,7 +386,14 @@ async function runGeneration(
             controller.signal,
         );
         try {
-            await repository().update(id, { bible, status: "READY" });
+            await repository().update(id, {
+                bible,
+                status: "READY",
+                // Written in the same update as the bible it is built from, so
+                // a READY public case always has its link and a row can never
+                // be found published with a slug describing an older title.
+                slug: isPublic ? await generateSlug(bible.crime.title) : null,
+            });
         } catch (error: unknown) {
             // The images are written but no row will ever reference them.
             await Promise.all(storedKeys.map(deleteImage));
@@ -352,6 +447,62 @@ async function markFailed(id: string): Promise<void> {
     }
 }
 
+/**
+ * The public docket: the newest cases whose players entered them into the
+ * public record, as tiles.
+ *
+ * Both filters are columns, so nothing queries inside the bible - the fields
+ * the tile needs are read off it here, after the rows are in hand. That does
+ * mean each row parses a whole bible to yield five strings, which is what
+ * PUBLIC_DOCKET_SIZE and the route's cache header bound.
+ *
+ * READY only: a PENDING row holds the placeholder bible, whose defendant is
+ * "Unnamed" and whose charge is "Pending investigation", and a FAILED one holds
+ * whatever it died with. Neither is a case anyone can open.
+ *
+ * ponytail: full scan, same as the retention sweep - nothing indexes isPublic
+ * or createdAt. One anonymous game's table does not warrant a migration; add
+ * the index when the scan shows up in query timings.
+ */
+export async function listPublicCases(): Promise<PublicCaseSummary[]> {
+    const entities = await repository().find({
+        where: { isPublic: true, status: "READY" },
+        order: { createdAt: "DESC" },
+        take: PUBLIC_DOCKET_SIZE,
+    });
+    // Field by field, never a spread: this list goes to people who did not
+    // generate these cases, so a bible field must not be able to arrive here by
+    // accident. Same rule as findCaseStatus, and it matters more.
+    return entities.map((entity) => ({
+        id: entity.id,
+        name: entity.bible.defendant.name,
+        title: entity.bible.crime.title,
+        charge: entity.bible.crime.charge,
+        photoUrl: entity.bible.defendant.photoUrl,
+    }));
+}
+
+/**
+ * The case behind a shared link.
+ *
+ * Public and READY only, which is the access rule stated twice: a private case
+ * has no slug to match in the first place, and this refuses to serve one even
+ * if a slug somehow outlived the flag. Then it hands off to findCaseStatus, so
+ * a link and an id serve byte-identical bodies through the same code.
+ *
+ * Two reads rather than one, and the first is id-only so nothing parses a bible
+ * to answer a miss. Newest wins for the same reason it does in findReusableCase:
+ * the column is not unique.
+ */
+export async function findPublicCaseBySlug(slug: string): Promise<CaseStatusResponse | null> {
+    const entity = await repository().findOne({
+        where: { slug, isPublic: true, status: "READY" },
+        order: { createdAt: "DESC" },
+        select: { id: true },
+    });
+    return entity ? findCaseStatus(entity.id) : null;
+}
+
 export async function findCaseStatus(id: string): Promise<CaseStatusResponse | null> {
     const entity = await repository().findOne({ where: { id } });
     if (!entity) {
@@ -389,6 +540,10 @@ export async function findCaseStatus(id: string): Promise<CaseStatusResponse | n
     return {
         status: "READY",
         id: entity.id,
+        // Null unless the case was entered into the public record. The client
+        // reads it as "may this be shared", and there is nothing else to read:
+        // a case with no slug has no url to hand anyone.
+        slug: entity.slug,
         defendant,
         crime,
         rootNode: publicNode(rootNode),

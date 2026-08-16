@@ -8,8 +8,10 @@ import {
     GenerationBusyError,
     createCase,
     findCaseStatus,
+    findPublicCaseBySlug,
     findReusableCase,
     generationSlotsAvailable,
+    listPublicCases,
 } from "@/cases_bundle/services/case_service";
 import { DogCheckBusyError, looksLikeDog } from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
@@ -56,13 +58,18 @@ const upload = multer({
     storage: multer.memoryStorage(),
     // parts is one above the real part count, because busboy's counter rejects a
     // lone file part at parts:1. fields is what actually stops the "one tiny file
-    // plus 100k text fields" body, files:1 the extra files. fields:1 is the
-    // optional dog name and nothing else; busboy's own 1MB fieldSize default
-    // bounds its length, and sanitiseName cuts it to MAX_NAME_LENGTH after that.
-    // Not tightened here on purpose: a fieldSize violation is a MulterError, and
-    // every MulterError answers "a photo is required", which an over-long name
-    // is not.
-    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 3, fields: 1 },
+    // plus 100k text fields" body, files:1 the extra files. fields:2 is the
+    // optional dog name and the public-record checkbox, and nothing else;
+    // busboy's own 1MB fieldSize default bounds their length, and sanitiseName
+    // cuts the name to MAX_NAME_LENGTH after that. Not tightened here on purpose:
+    // a fieldSize violation is a MulterError, and every MulterError answers "a
+    // photo is required", which an over-long name is not.
+    //
+    // Both counts are exact, so they are load-bearing in the other direction
+    // too: leaving fields at 1 when the checkbox was added would have made every
+    // upload that carried a name AND a checkbox a MulterError, answered "A photo
+    // is required" for a request that had one.
+    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 4, fields: 2 },
     fileFilter: (_req, file, callback) => {
         // Client-declared mime type is a hint, not proof - it caps the obvious
         // junk; the size limit is what actually bounds the request.
@@ -210,6 +217,19 @@ function sanitiseName(body: unknown): string {
     // sheet, in the courtroom caption and on the verdict line.
     const cut = Array.from(cleaned).slice(0, MAX_NAME_LENGTH).join("").trim();
     return cut || DEFAULT_DEFENDANT_NAME;
+}
+
+/**
+ * Whether the player ticked "Enter into the public record".
+ *
+ * multipart carries no booleans - the field arrives as a string or not at all -
+ * and the client omits it entirely when the box is clear. Only the exact string
+ * counts: publishing a player's dog is not something to infer from "1", "on" or
+ * a field that happens to be present, and an absent field is the safe default
+ * either way.
+ */
+function wantsPublicRecord(body: unknown): boolean {
+    return typeof body === "object" && body !== null && "public" in body && body.public === "true";
 }
 
 // The player's name for their dog is written through the whole bible - the
@@ -421,6 +441,7 @@ casesRouter.post(
                 // request without a file never gets past requirePhoto. Stored
                 // so the NEXT identical upload finds this case.
                 req.photoHash ?? null,
+                wantsPublicRecord(req.body),
             );
             res.status(202).json(accepted);
         } catch (error: unknown) {
@@ -495,6 +516,71 @@ casesRouter.post("/:id/turn", perIpTurnLimiter, async (req, res) => {
         return;
     }
     res.json(outcome);
+});
+
+/**
+ * Cheap per row, but not free: every tile is a full row read whose bible is
+ * JSON.parsed to yield five strings, and the list is public, so nothing else
+ * bounds how often it is asked for. 30 a minute is far above a home page that
+ * fetches it once on load.
+ */
+const perIpDocketLimiter = rateLimit({
+    windowMs: 60_000,
+    max: positiveIntEnv("DOCKET_MAX_PER_MINUTE", 30),
+});
+
+/**
+ * The public docket: cases their players entered into the public record.
+ *
+ * Mounted ABOVE GET /:id and it has to stay there - Express takes the first
+ * route that matches, so below it "public" is read as a case id and the uuid
+ * guard answers "Case not found."
+ */
+casesRouter.get("/public", perIpDocketLimiter, async (_req, res) => {
+    // Not immutable like a READY case: the list changes as cases are published
+    // and as old ones age out of retention. A minute is short enough that a
+    // player's own case appears while they are still on the page, and long
+    // enough that a reload loop costs one query rather than one per hit.
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.json(await listPublicCases());
+});
+
+/**
+ * A shared link's slug: "biscuit-a1b2c3". Same job as UUID_PATTERN on the id
+ * routes - it keeps a junk path from reaching a query, and it bounds the length
+ * of a string an anonymous caller puts in a WHERE clause.
+ */
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_SLUG_LENGTH = 64;
+
+/**
+ * The case behind a shared link. Mounted above /:id like the docket, and for
+ * the same reason: below it, "link" is read as a case id.
+ *
+ * Only a case entered into the public record has a slug at all, so this route
+ * cannot reach a private one - which is what makes "only public cases get a
+ * link" a property of the data rather than a rule the client is trusted with.
+ */
+casesRouter.get("/link/:slug", async (req, res) => {
+    const slug = req.params.slug;
+    if (typeof slug !== "string" || slug.length > MAX_SLUG_LENGTH || !SLUG_PATTERN.test(slug)) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    const result = await findPublicCaseBySlug(slug);
+    if (!result) {
+        // no-store on the miss: a case published a moment from now must not be
+        // answered "not found" out of a cache for the next year.
+        res.setHeader("Cache-Control", "no-store");
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    // Only READY resolves here, so this is the same immutable body GET /:id
+    // serves for a finished case.
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.json(result);
 });
 
 casesRouter.get("/:id", async (req, res) => {

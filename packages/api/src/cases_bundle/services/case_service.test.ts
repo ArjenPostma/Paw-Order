@@ -2,7 +2,7 @@ import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { AppDataSource } from "@/database_bundle/util/data_source";
 import { CaseEntity } from "@/cases_bundle/models/case_entity";
-import { createCase, generationSlotsInUse } from "@/cases_bundle/services/case_service";
+import { createCase, generationSlotsInUse, slugStem } from "@/cases_bundle/services/case_service";
 
 // The deadline is read once at module load, so lowering it has to happen before
 // case_service is imported. vi.hoisted runs ahead of the imports above; 50ms is
@@ -60,16 +60,59 @@ afterAll(async () => {
     await AppDataSource.destroy();
 });
 
+// The fixture has exactly one title, so nothing an HTTP test can upload reaches
+// the cut or the fallback. Model titles are neither short nor reliably latin.
+describe("slug stems", () => {
+    it("keeps a title that fits, hyphenated and lowercase", () => {
+        expect(slugStem("The Great Birthday Cake Heist")).toBe("the-great-birthday-cake-heist");
+    });
+
+    it("cuts a long title at a word rather than mid-word", () => {
+        const stem = slugStem("The Extraordinarily Protracted Matter Of The Missing Sausage");
+        expect(stem.length).toBeLessThanOrEqual(40);
+        // The cut lands between words: no trailing hyphen, and no half word.
+        expect(stem).toBe("the-extraordinarily-protracted-matter");
+    });
+
+    // One word past the budget has no earlier word to fall back to, so it is
+    // cut where it is rather than reduced to nothing.
+    it("cuts inside a single word too long to break", () => {
+        expect(slugStem("z".repeat(50))).toBe("z".repeat(40));
+    });
+
+    it("folds accents rather than dropping the letters under them", () => {
+        expect(slugStem("Café Caper")).toBe("cafe-caper");
+    });
+
+    // A title this keeps nothing of still has to produce a usable url: the six
+    // hex that follow are what identify the row.
+    it("falls back when a title survives as nothing", () => {
+        expect(slugStem("...")).toBe("case");
+        expect(slugStem("事件")).toBe("case");
+        expect(slugStem("")).toBe("case");
+    });
+});
+
 describe("generation deadline", () => {
     it("fails a case whose generation never returns", async () => {
-        const accepted = await createCase({ bytes: PNG_1X1, mimeType: "image/png" }, "Rex", null);
+        const accepted = await createCase(
+            { bytes: PNG_1X1, mimeType: "image/png" },
+            "Rex",
+            null,
+            false,
+        );
         expect(accepted.status).toBe("PENDING");
 
         expect(await pollUntilSettled(accepted.id)).toBe("FAILED");
     });
 
     it("releases the generation slot when the deadline fires", async () => {
-        const accepted = await createCase({ bytes: PNG_1X1, mimeType: "image/png" }, "Rex", null);
+        const accepted = await createCase(
+            { bytes: PNG_1X1, mimeType: "image/png" },
+            "Rex",
+            null,
+            false,
+        );
         await pollUntilSettled(accepted.id);
 
         // The release is in runGeneration's finally, which runs after the status
