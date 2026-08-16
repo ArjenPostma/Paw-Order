@@ -15,14 +15,20 @@ import {
     unpublishCase,
 } from "@/cases_bundle/services/case_service";
 import type { PhotoScreening } from "@/cases_bundle/services/case_generator";
-import { DogCheckBusyError, screenPhoto } from "@/cases_bundle/services/case_generator";
+import {
+    DogCheckBusyError,
+    dogCheckSlotsAvailable,
+    screenPhoto,
+} from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
 import { playTurn } from "@/cases_bundle/services/trial_service";
 import { dailyBudget, rateLimit } from "@/http/rate_limit";
+import { generationDailyBudget } from "@/http/generation_budget";
+import { UnreadableImageError } from "@/storage/r2";
 
 // Declaration merging rather than a cast onto the request: reuseExistingCase
 // already hashed the photo and the route handler needs that digest to store on
-// the row, and hashing 8MB a second time to avoid one interface is the wrong
+// the row, and hashing 20MB a second time to avoid one interface is the wrong
 // saving.
 declare module "express-serve-static-core" {
     interface Request {
@@ -31,12 +37,25 @@ declare module "express-serve-static-core" {
     }
 }
 
-const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+/**
+ * The upload cap, and it is a memory number rather than a storage one: nothing
+ * this big is ever stored. The client downscales to 1024px before sending, and
+ * whatever arrives is re-encoded from its decoded pixels before it reaches the
+ * bucket, so the ceiling only has to be generous enough for a phone photo that
+ * skipped both - a modern 50MP HEIC-converted JPEG clears 8MB on its own.
+ *
+ * What it does bound is what one request holds in memory: this buffer, plus the
+ * ~1.34x base64 copy the dog check makes of it. UPLOAD_MAX_CONCURRENT and
+ * DOG_CHECK_MAX_CONCURRENT are what turn that into a total, and both were
+ * lowered when this was raised - the product of the three is the number that
+ * has to fit in the container.
+ */
+const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Long enough for any dog's name, short enough that it cannot be a paragraph. */
 const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
+const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 20MB) is required.";
 const NOT_A_DOG = "This court only tries dogs. Try a photo of one.";
 const NOT_PUBLISHABLE =
     "This photo cannot be entered into the public record. Untick the box to try this case privately.";
@@ -114,7 +133,7 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
 /**
  * The outer per-ip bound, and the only one mounted before the body is read. It
  * is deliberately loose: what it exists to cap is the work done on the way to
- * deciding whether to generate at all - buffering up to 8MB of multipart, and
+ * deciding whether to generate at all - buffering up to 20MB of multipart, and
  * the dog check's model call - not generation itself, which the tighter limiter
  * below owns.
  *
@@ -179,6 +198,30 @@ const perIpDailyLimiter = rateLimit({
  * Set well above the generation budget, because rejecting non-dogs is the
  * cheap outcome and should not be the scarce one.
  */
+/**
+ * The per-ip half of the dog-check ceiling.
+ *
+ * The global budget below has no per-ip subdivision of its own, so one address
+ * at the upload limiter's ten a minute could spend all 200 of the day's checks
+ * in twenty minutes and close new cases for every other player, while the
+ * generation budget sat untouched. This is what makes the global one a backstop
+ * rather than the only thing in the way.
+ *
+ * Not refunded, for the same reason the global one is not: a photo with no dog
+ * in it is exactly the spend both exist to bound. Note that moving
+ * perIpDailyLimiter in front of the check instead would not do this job - it
+ * refunds on rejection, so the 400 would hand the slot straight back.
+ */
+const perIpDogCheckLimiter = rateLimit({
+    windowMs: DAY_MS,
+    max: () => positiveIntEnv("DOG_CHECK_MAX_PER_IP_PER_DAY", 10),
+    // Same shape as the other 24h ceiling's: what the player can do next, not
+    // which counter they met.
+    message: "That is enough photos for today. The cases below are still open.",
+    // A day-long window accumulates every caller of the day, not every recent
+    // one, so it needs the same headroom perIpDailyLimiter has.
+    maxTrackedIps: 200_000,
+});
 const dogCheckBudget = dailyBudget({
     dailyMax: () => positiveIntEnv("DOG_CHECK_MAX_PER_DAY", 200),
     // No message of its own: the default already says the one thing that is true
@@ -187,21 +230,83 @@ const dogCheckBudget = dailyBudget({
     //
     // Deliberately NOT refunded: the 400 this guards IS the spend it bounds.
 });
-const globalDailyBudget = dailyBudget({
-    dailyMax: () => positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
-    refundOnRejection: true,
-});
+
+const COURT_FULL = "The court is full. Try again in a minute.";
 
 /**
- * Rejects a full server before multer buffers 8MB of body and before the daily
+ * Rejects a full server before multer buffers the body and before the daily
  * budget is charged, so back-pressure costs the operator nothing.
  */
 const rejectWhenBusy: RequestHandler = (_req, res, next) => {
     if (!generationSlotsAvailable()) {
         res.setHeader("Retry-After", "60");
-        res.status(503).json({ error: "The court is full. Try again in a minute." });
+        res.status(503).json({ error: COURT_FULL });
         return;
     }
+    next();
+};
+
+/**
+ * The same shed for the dog check, and it has to run BEFORE dogCheckBudget.
+ *
+ * screenPhoto throws DogCheckBusyError before it makes any model call, so a 503
+ * from behind the budget spent a slot of a 24h ceiling on a request that cost
+ * nothing to refuse - and four overlapping uploads is ordinary traffic, not an
+ * attack. requireDog still catches the error itself: two requests can pass this
+ * and only one gets the slot.
+ */
+const rejectWhenDogCheckBusy: RequestHandler = (_req, res, next) => {
+    if (!dogCheckSlotsAvailable()) {
+        res.setHeader("Retry-After", "60");
+        res.status(503).json({ error: COURT_FULL });
+        return;
+    }
+    next();
+};
+
+/**
+ * Concurrent multipart uploads, across all callers.
+ *
+ * perIpUploadLimiter bounds how OFTEN one address may upload, which is not the
+ * same as how many bodies are in memory at once - and it is keyed on the
+ * caller's address, which an IPv6 host can rotate through a whole /64. Nothing
+ * else stands in front of multer: the generation and dog-check ceilings all sit
+ * behind the parse, so without this the multipart buffer is the one paid-for
+ * resource with no process-wide bound at all.
+ *
+ * Four, against a 20MB cap, is 80MB of buffers at the worst moment. Raise them
+ * together or not at all: the two numbers multiply.
+ */
+const maxConcurrentUploads = (): number => positiveIntEnv("UPLOAD_MAX_CONCURRENT", 4);
+let uploadsInFlight = 0;
+
+/**
+ * Test seam. Two overlapping supertest requests race the event loop, so the only
+ * way to observe the shed deterministically is to hold a slot from outside.
+ */
+export function acquireUploadSlot(): boolean {
+    if (uploadsInFlight >= maxConcurrentUploads()) {
+        return false;
+    }
+    uploadsInFlight += 1;
+    return true;
+}
+
+export function releaseUploadSlot(): void {
+    if (uploadsInFlight > 0) {
+        uploadsInFlight -= 1;
+    }
+}
+
+const rejectWhenUploadBusy: RequestHandler = (_req, res, next) => {
+    if (!acquireUploadSlot()) {
+        res.setHeader("Retry-After", "60");
+        res.status(503).json({ error: COURT_FULL });
+        return;
+    }
+    // close, not finish: the buffer is alive until the request is over however
+    // it ends, and an aborted upload is precisely the one that never finishes.
+    res.on("close", releaseUploadSlot);
     next();
 };
 
@@ -441,10 +546,10 @@ const requireDog: RequestHandler = async (req, res, next) => {
     } catch (error: unknown) {
         // Every check holds the photo and its base64 copy alive while it runs,
         // so the slots are a memory bound, not a cost one. Shedding here is the
-        // right answer: the alternative is queueing 8MB buffers behind it.
+        // right answer: the alternative is queueing 20MB buffers behind it.
         if (error instanceof DogCheckBusyError) {
             res.setHeader("Retry-After", "60");
-            res.status(503).json({ error: "The court is full. Try again in a minute." });
+            res.status(503).json({ error: COURT_FULL });
             return;
         }
         throw error;
@@ -477,30 +582,41 @@ export const casesRouter = Router();
 // player's minute for a photo with no dog in it or one whose case already
 // existed, and then answered the upload that WOULD have worked with a 429.
 //
-// perIpUploadLimiter and dogCheckBudget are the exceptions, and only because
-// they guard the work that happens before that decision can be made: the
-// multipart buffer and the dog check's model call. Neither is refunded on a
-// rejection - the rejected request is exactly what they exist to bound - and
-// every ceiling behind them is, so being told no never costs a case.
+// perIpUploadLimiter, perIpDogCheckLimiter and dogCheckBudget are the
+// exceptions, and only because they guard the work that happens before that
+// decision can be made: the multipart buffer and the dog check's model call.
+// None of the three is refunded on a rejection - the rejected request is exactly
+// what they exist to bound - and every ceiling behind them is, so being told no
+// never costs a case.
+//
+// Both sheds run in front of the ceiling they protect, never behind it. A 503
+// makes no model call, so charging a budget for one spends a slot on nothing:
+// rejectWhenBusy ahead of the generation ceilings, rejectWhenDogCheckBusy ahead
+// of the two dog-check ones.
 //
 // rejectWhenBusy sits behind reuseExistingCase rather than in front of it: a
 // reuse generates nothing and needs no slot, so answering it with "the court is
 // full" turned a free hit into a failure. The cost is that the multipart body is
-// buffered before the 503, which perIpUploadLimiter bounds.
+// buffered before the 503, which perIpUploadLimiter and rejectWhenUploadBusy
+// bound between them - the first how often one caller may do it, the second how
+// many of those buffers exist at once.
 casesRouter.post(
     "/",
     perIpUploadLimiter,
+    rejectWhenUploadBusy,
     uploadPhoto,
     requirePhoto,
     requireHuman,
     requireCleanName,
     reuseExistingCase,
     rejectWhenBusy,
+    rejectWhenDogCheckBusy,
+    perIpDogCheckLimiter,
     dogCheckBudget,
     requireDog,
     perIpGenerationLimiter,
     perIpDailyLimiter,
-    globalDailyBudget,
+    generationDailyBudget,
     async (req, res) => {
         const file = req.file;
         if (!file) {
@@ -528,7 +644,14 @@ casesRouter.post(
             // between two requests that both saw a free slot.
             if (error instanceof GenerationBusyError) {
                 res.setHeader("Retry-After", "60");
-                res.status(503).json({ error: "The court is full. Try again in a minute." });
+                res.status(503).json({ error: COURT_FULL });
+                return;
+            }
+            // The mime allowlist reads a header the caller wrote; this is the
+            // decoder disagreeing with it. A 400 rather than a 500: the request
+            // is wrong, not the server.
+            if (error instanceof UnreadableImageError) {
+                res.status(400).json({ error: PHOTO_REQUIRED });
                 return;
             }
             throw error;

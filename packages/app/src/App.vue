@@ -184,6 +184,13 @@ async function openFromLocation(): Promise<void> {
     // the navigation, open its case and push the url straight back on.
     run += 1;
     const thisRun = run;
+    // Whatever this navigation turns out to be, the generation that was being
+    // polled is no longer the one on screen - the bumped run has already ended
+    // its poll loop. Left set, `preparing` holds up a screen whose only way out
+    // is the button that appears when a poll stalls, and no poll is running to
+    // stall: a Back press mid-generation was a dead end short of a reload.
+    preparing.value = false;
+    stalled.value = null;
 
     if (slug === null) {
         // Navigated back out of a case. The url says home, so the app follows.

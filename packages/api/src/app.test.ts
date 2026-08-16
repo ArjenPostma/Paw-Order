@@ -15,6 +15,8 @@ import {
     failStalePendingCases,
     generationSlotsInUse,
 } from "@/cases_bundle/services/case_service";
+import { acquireUploadSlot, releaseUploadSlot } from "@/cases_bundle/router";
+import { acquireDogCheckSlot, releaseDogCheckSlot } from "@/cases_bundle/services/case_generator";
 
 // Smallest valid PNG (1x1, transparent).
 const PNG_1X1 = Buffer.from(
@@ -199,8 +201,11 @@ describe("api wiring", () => {
         expect(fetched.body.nodes).toBeUndefined();
         expect(fetched.body.rootNodeId).toBeUndefined();
         expect(fetched.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
-        // Tests must never write to the real bucket, whatever packages/api/.env holds.
-        expect(fetched.body.defendant.photoUrl).toContain("data:image/png");
+        // Tests must never write to the real bucket, whatever packages/api/.env
+        // holds. webp rather than the png that was posted, because the upload is
+        // re-encoded from the decoded pixels before it is stored: whatever else
+        // was in that file does not reach the bucket, and neither does its EXIF.
+        expect(fetched.body.defendant.photoUrl).toContain("data:image/webp");
     });
 
     // Two truth-derived fields that are NOT called `truth`. `reliable` names the
@@ -1332,13 +1337,102 @@ describe("shared case links", () => {
 
 describe("upload guards", () => {
     it("rejects a photo over the size cap with 400, not 500", async () => {
-        const oversize = Buffer.alloc(9 * 1024 * 1024, 1);
+        const oversize = Buffer.alloc(21 * 1024 * 1024, 1);
         const response = await request(app)
             .post("/api/cases")
             .field("dwell", "2500")
             .attach("photo", oversize, { filename: "big.png", contentType: "image/png" });
 
         expect(response.status).toBe(400);
+    });
+
+    // The mime allowlist reads a header the caller wrote, and the dog check is a
+    // model being asked what is in the picture, not a decoder. This is the only
+    // thing between bytes the caller chose and an object on a public domain the
+    // operator owns, served immutable for a year.
+    it("rejects bytes that are not a decodable image, whatever the header says", async () => {
+        const response = await request(app)
+            .post("/api/cases")
+            .field("dwell", "2500")
+            .attach("photo", Buffer.from("<html>not an image at all</html>"), {
+                filename: "dog.png",
+                contentType: "image/png",
+            });
+
+        expect(response.status).toBe(400);
+    });
+
+    // Multer buffers the whole body before any generation ceiling is consulted,
+    // and a rate is not a concurrency. Held from outside rather than raced with a
+    // second request: the shed is deterministic, the event loop is not.
+    it("sheds an upload when every buffer slot is taken", async () => {
+        process.env.UPLOAD_MAX_CONCURRENT = "1";
+        expect(acquireUploadSlot()).toBe(true);
+
+        try {
+            const response = await request(app)
+                .post("/api/cases")
+                .field("dwell", "2500")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+            expect(response.status).toBe(503);
+            expect(response.headers["retry-after"]).toBe("60");
+        } finally {
+            releaseUploadSlot();
+            process.env.UPLOAD_MAX_CONCURRENT = "1000";
+        }
+    });
+
+    // A busy dog check is shed rather than queued: each one holds the photo and
+    // a base64 copy of it alive, so the alternative is stacking those in memory.
+    // That the shed runs in FRONT of the two dog-check ceilings is the mount
+    // order in the router - a 503 makes no model call, so charging a paid budget
+    // for one spends a slot on nothing.
+    it("sheds a busy dog check rather than queueing another photo behind it", async () => {
+        process.env.DOG_CHECK_MAX_CONCURRENT = "1";
+        expect(acquireDogCheckSlot()).toBe(true);
+
+        try {
+            const shed = await request(app)
+                .post("/api/cases")
+                .field("dwell", "2500")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+
+            expect(shed.status).toBe(503);
+            expect(shed.headers["retry-after"]).toBe("60");
+        } finally {
+            releaseDogCheckSlot();
+            delete process.env.DOG_CHECK_MAX_CONCURRENT;
+        }
+    });
+
+    // One address must not be able to spend the whole day's dog checks: the
+    // global budget behind this is a backstop, not the only thing in the way.
+    // A minted caller, because the ceiling is per ip and every other test in
+    // this file shares one address.
+    it("caps the dog check per caller as well as per process", async () => {
+        const proxied = appTrustingProxy();
+        const caller = "198.51.100.7";
+        process.env.DOG_CHECK_MAX_PER_IP_PER_DAY = "1";
+
+        try {
+            const first = await request(proxied)
+                .post("/api/cases")
+                .set("X-Forwarded-For", caller)
+                .field("dwell", "2500")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+            expect(first.status).toBe(202);
+
+            const second = await request(proxied)
+                .post("/api/cases")
+                .set("X-Forwarded-For", caller)
+                .field("dwell", "2500")
+                .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+            expect(second.status).toBe(429);
+            expect(second.body.error).toContain("enough photos for today");
+        } finally {
+            process.env.DOG_CHECK_MAX_PER_IP_PER_DAY = "1000";
+        }
     });
 
     it("rejects a disallowed mime type", async () => {

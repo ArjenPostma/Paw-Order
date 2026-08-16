@@ -3,7 +3,7 @@
  *
  * Nothing paints the uploaded photo larger than the 224px mugshot, and the only
  * consumer that wants real pixels is the image model, which renders its exhibits
- * from a reference this size. An 8MB phone photo is 99% waste on both counts.
+ * from a reference this size. A 20MB phone photo is 99% waste on both counts.
  */
 const MAX_EDGE = 1024;
 

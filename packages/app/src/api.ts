@@ -26,6 +26,13 @@ const TURN_TIMEOUT_MS = 15000;
  * loop, which has its own attempt and consecutive-failure ceilings.
  */
 const FETCH_TIMEOUT_MS = 15000;
+/**
+ * The upload's own deadline, and longer than the two above because this one
+ * carries up to 20MB over whatever connection the player is on. It still needs
+ * one: with no deadline a stalled upload never resolves and never rejects, and
+ * the preparing screen it leaves behind has no way out but reloading the tab.
+ */
+const UPLOAD_TIMEOUT_MS = 60000;
 
 /**
  * Carries the status alongside the message. A caller that has to tell "this case
@@ -61,7 +68,7 @@ function waitFor(seconds: number): string {
 
 async function readJson(response: Response): Promise<unknown> {
     if (!response.ok) {
-        // The api sends an actionable message ("max 8MB", "Case not found");
+        // The api sends an actionable message ("max 20MB", "Case not found");
         // discarding it for a bare status code leaves the user nothing to fix.
         const body: unknown = await response.json().catch(() => null);
         const message =
@@ -115,7 +122,19 @@ export async function createCase(
         body.append("public", "true");
     }
     body.append("photo", photo);
-    const response = await fetch(apiUrl("/api/cases"), { method: "POST", body });
+    let response;
+    try {
+        response = await fetch(apiUrl("/api/cases"), {
+            method: "POST",
+            body,
+            signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+        });
+    } catch {
+        // Includes the timeout, and every transport failure with it. The raw
+        // DOMException reads "signal timed out" and the raw TypeError reads
+        // "Failed to fetch"; neither is something to show a player.
+        throw new Error("The photo did not reach the clerk. Try that again.");
+    }
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseAccepted;
 }

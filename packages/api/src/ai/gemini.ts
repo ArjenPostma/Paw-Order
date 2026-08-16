@@ -77,7 +77,7 @@ export interface GeneratedImage {
 /**
  * A photo already encoded for the wire. One generation sends the same reference
  * photo to four calls, three of them concurrent, and `toString("base64")` on an
- * 8MB buffer allocates ~10.7MB every time - so encoding per call held three
+ * 20MB buffer allocates ~27MB every time - so encoding per call held three
  * independent copies of the same bytes alive at once. Encode once, pass this.
  */
 export interface EncodedImage {

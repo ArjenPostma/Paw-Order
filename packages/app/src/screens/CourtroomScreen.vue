@@ -162,7 +162,12 @@ watch(
     () => props.node.id,
     async () => {
         await nextTick();
-        statementRef.value?.focus();
+        // Back to the top first: on one column the responses sit a screen below
+        // the question, so answering leaves the next question scrolled off. Same
+        // move the app makes between screens. preventScroll so focus does not
+        // pull the page back down to whatever the frame's own position is.
+        window.scrollTo({ top: 0 });
+        statementRef.value?.focus({ preventScroll: true });
     },
 );
 

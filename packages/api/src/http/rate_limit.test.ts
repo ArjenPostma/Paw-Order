@@ -2,7 +2,7 @@ import { once } from "node:events";
 import express from "express";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
-import { dailyBudget, rateLimit } from "@/http/rate_limit";
+import { bucketKey, dailyBudget, rateLimit } from "@/http/rate_limit";
 import type { RateLimitOptions } from "@/http/rate_limit";
 
 /**
@@ -109,6 +109,64 @@ describe("rateLimit", () => {
         expect((await get(app, "1.1.1.1")).status).toBe(400);
         expect((await get(app, "1.1.1.1")).status).toBe(429);
     });
+
+    // The map is the limiter's own memory, and a caller who can pick their key
+    // can grow it. Without the eviction below, a flood of distinct addresses is
+    // the memory exhaustion the limiter is there to prevent.
+    it("evicts rather than growing past maxTrackedIps", async () => {
+        const app = appWith({ windowMs: 60_000, max: 1, maxTrackedIps: 2 });
+
+        expect((await get(app, "1.1.1.1")).status).toBe(200);
+        expect((await get(app, "1.1.1.1")).status).toBe(429);
+        expect((await get(app, "2.2.2.2")).status).toBe(200);
+
+        // Third distinct caller inside the same window: every bucket is live, so
+        // pruning frees nothing and the map is dropped wholesale. The price of
+        // that is exactly what the next line reads - the caller who was already
+        // out of slots gets a fresh window. A 429 here means the map grew
+        // instead.
+        expect((await get(app, "3.3.3.3")).status).toBe(200);
+        expect((await get(app, "1.1.1.1")).status).toBe(200);
+    });
+
+    // An IPv6 caller is handed a whole /64 and can send from any address in it,
+    // so keying on the full address is keying on something the caller chooses.
+    it("counts an IPv6 caller by their /64, not their address", async () => {
+        const app = appWith({ windowMs: 60_000, max: 1 });
+
+        expect((await get(app, "2001:db8:1:2::1")).status).toBe(200);
+        // Same /64, address the caller picked for free. Same bucket.
+        expect((await get(app, "2001:db8:1:2::99ff")).status).toBe(429);
+        // A different /64 is a different caller.
+        expect((await get(app, "2001:db8:1:3::1")).status).toBe(200);
+    });
+});
+
+describe("bucketKey", () => {
+    it("keeps an IPv4 address whole", () => {
+        expect(bucketKey("203.0.113.7")).toBe("203.0.113.7");
+    });
+
+    // What Express hands back for an IPv4 client on a dual-stack socket. Read as
+    // IPv6 and truncated to four hextets it becomes "0000:0000:0000:0000", which
+    // files every IPv4 caller on earth in one bucket.
+    it("reads an IPv4-mapped address as the IPv4 caller it is", () => {
+        expect(bucketKey("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    });
+
+    it("truncates an IPv6 address to its /64, expanding the zero run", () => {
+        expect(bucketKey("2001:db8::1")).toBe("2001:0db8:0000:0000");
+        expect(bucketKey("2001:db8::9999")).toBe("2001:0db8:0000:0000");
+        expect(bucketKey("2001:0db8:0001:0002:0003:0004:0005:0006")).toBe("2001:0db8:0001:0002");
+    });
+
+    it("ignores a zone id, which is not part of the address", () => {
+        expect(bucketKey("fe80::1%eth0")).toBe("fe80:0000:0000:0000");
+    });
+
+    it("has a key for a caller Express could not resolve", () => {
+        expect(bucketKey(undefined)).toBe("unknown");
+    });
 });
 
 describe("dailyBudget", () => {
@@ -158,5 +216,41 @@ describe("dailyBudget", () => {
         }
         expect((await request(app).get("/")).status).toBe(200);
         expect((await request(app).get("/")).status).toBe(429);
+    });
+
+    // Generation is accepted with a 202 and then runs in the background, so the
+    // rejection refund cannot see it fail: by the time the failure is known the
+    // response has finished and its status said yes. Without release, a model
+    // outage spends the whole day's budget on generations that bought nothing.
+    it("hands a slot back after the response has already gone out", async () => {
+        const budget = dailyBudget({ dailyMax: 1 });
+        const app = express();
+        app.get("/", budget, (_req, res) => {
+            res.status(202).json({ accepted: true });
+        });
+
+        expect((await request(app).get("/")).status).toBe(202);
+        expect((await request(app).get("/")).status).toBe(429);
+
+        budget.release();
+        expect((await request(app).get("/")).status).toBe(202);
+    });
+
+    it("will not release a slot that was never charged", () => {
+        const budget = dailyBudget({ dailyMax: 1 });
+        const app = express();
+        app.get("/", budget, (_req, res) => {
+            res.status(202).json({ accepted: true });
+        });
+
+        // Releases with nothing outstanding must not lend the day a slot it
+        // never spent - a background failure can outlive its own window.
+        budget.release();
+        budget.release();
+
+        return request(app)
+            .get("/")
+            .expect(202)
+            .then(() => request(app).get("/").expect(429));
     });
 });

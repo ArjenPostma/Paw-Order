@@ -70,7 +70,7 @@ export function playedCases(): PlayedCase[] {
  *
  * The photo is dropped when it is a data: URL. The api falls back to inlining
  * the bytes when R2_BUCKET is unset (r2.ts), which is the documented local
- * setup, and an 8MB upload inlines to an ~11MB string - one of those blows the
+ * setup, and a 20MB upload inlines to an ~27MB string - one of those blows the
  * ~5MB quota, and from then on every write here throws and is swallowed, so the
  * strip silently stops updating and a dead tile can never be dropped either. The
  * tile renders its placard without a photo instead.

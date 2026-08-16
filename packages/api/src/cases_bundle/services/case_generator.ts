@@ -45,8 +45,13 @@ const MAX_ATTEMPTS = 2;
  * Asks for JSON, validates it, and on rejection asks again with the reasons.
  * The feedback loop is the whole point: "nextNodeId N9 is not a node" is
  * something a model can act on, where a bare retry just rolls the dice again.
+ *
+ * Exported for its test only, on the same grounds as renderEvidence below:
+ * generateCaseBible answers the fixture under APP_ENV=test and never reaches
+ * this, so MAX_ATTEMPTS - the bound on how many paid calls one stage can make -
+ * could be raised, or the loop left without an exit, with the suite still green.
  */
-async function generateValidated<T>(
+export async function generateValidated<T>(
     stage: string,
     prompt: string,
     schema: Schema,
@@ -196,13 +201,16 @@ const DOG_CHECK_TIMEOUT_MS = positiveIntEnv("DOG_CHECK_TIMEOUT_MS", 8_000);
 /**
  * Concurrent dog checks.
  *
- * Each one holds the uploaded photo (up to 8MB) and the base64 copy encodeImage
- * makes of it (~10.7MB) alive for as long as the call takes, and it runs before
- * createCase, so the generation slot counter never sees it and never bounds it.
- * Uncapped, that was ~19MB per in-flight upload with only a per-minute per-ip
- * limiter deciding how many could overlap.
+ * Each one holds the uploaded photo (up to the 20MB upload cap) and the base64
+ * copy encodeImage makes of it (~1.34x that) alive for as long as the call
+ * takes, and it runs before createCase, so the generation slot counter never
+ * sees it and never bounds it. Uncapped, that is ~47MB per in-flight upload with
+ * only a per-minute per-ip limiter deciding how many could overlap.
+ *
+ * Two, at that size, is ~54MB of base64 on top of the buffers the upload ceiling
+ * already bounds. It came down when the upload cap went up; the two multiply.
  */
-const MAX_CONCURRENT_DOG_CHECKS = positiveIntEnv("DOG_CHECK_MAX_CONCURRENT", 4);
+const maxConcurrentDogChecks = (): number => positiveIntEnv("DOG_CHECK_MAX_CONCURRENT", 2);
 
 let dogChecksInFlight = 0;
 
@@ -210,6 +218,34 @@ let dogChecksInFlight = 0;
 export class DogCheckBusyError extends Error {
     constructor() {
         super("All dog check slots are busy.");
+    }
+}
+
+/**
+ * Lets the router shed a busy request BEFORE the dog-check budget is charged.
+ *
+ * Without it the 503 below spent a slot of a 24h budget that exists to bound
+ * model spend, on a request that made no model call at all - so an ordinary
+ * burst of concurrent uploads could close the court for the day having cost
+ * nothing to serve. Same early-out shape as generationSlotsAvailable: two
+ * requests can pass it and only one gets the slot, which acquire below decides.
+ */
+export function dogCheckSlotsAvailable(): boolean {
+    return dogChecksInFlight < maxConcurrentDogChecks();
+}
+
+/** Takes a slot, or reports that every one is busy. Paired with release. */
+export function acquireDogCheckSlot(): boolean {
+    if (!dogCheckSlotsAvailable()) {
+        return false;
+    }
+    dogChecksInFlight += 1;
+    return true;
+}
+
+export function releaseDogCheckSlot(): void {
+    if (dogChecksInFlight > 0) {
+        dogChecksInFlight -= 1;
     }
 }
 
@@ -258,6 +294,21 @@ export function readScreening(value: unknown): PhotoScreening {
  * isDog fall open, nothing reaches READY anyway, so there is no case to publish.
  */
 export async function screenPhoto(photo: GeneratedImage): Promise<PhotoScreening> {
+    // Ahead of the test short-circuit, not behind it: the slot accounting is a
+    // memory bound the suite has to be able to reach, and every path out of this
+    // function releases through the same finally either way.
+    if (!acquireDogCheckSlot()) {
+        throw new DogCheckBusyError();
+    }
+
+    try {
+        return await runScreening(photo);
+    } finally {
+        releaseDogCheckSlot();
+    }
+}
+
+async function runScreening(photo: GeneratedImage): Promise<PhotoScreening> {
     if (resolveAppEnv() === "test") {
         // The suite must never reach Gemini. Same guard shape as r2.ts.
         //
@@ -273,11 +324,6 @@ export async function screenPhoto(photo: GeneratedImage): Promise<PhotoScreening
             safeForPublic: process.env.TEST_PHOTO_IS_SAFE !== "false",
         };
     }
-
-    if (dogChecksInFlight >= MAX_CONCURRENT_DOG_CHECKS) {
-        throw new DogCheckBusyError();
-    }
-    dogChecksInFlight += 1;
 
     try {
         const text = await generateJson(DOG_CHECK_PROMPT, DOG_SCHEMA, {
@@ -302,8 +348,6 @@ export async function screenPhoto(photo: GeneratedImage): Promise<PhotoScreening
             error,
         );
         return { isDog: true, safeForPublic: false };
-    } finally {
-        dogChecksInFlight -= 1;
     }
 }
 

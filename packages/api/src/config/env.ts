@@ -37,6 +37,11 @@ export function assertAppEnvExplicit(): void {
 
 const REQUIRED_IN_PRODUCTION = [
     "DATABASE_URL",
+    // Not a secret, and required for the same reason the secrets are: without it
+    // req.ip is the edge's address rather than the caller's, every rate limiter
+    // files the whole internet under one bucket, and the app answers 429 to
+    // almost everyone while looking perfectly healthy.
+    "TRUST_PROXY",
     "CORS_ORIGIN",
     "GEMINI_API_KEY",
     "R2_ACCOUNT_ID",

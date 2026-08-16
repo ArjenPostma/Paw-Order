@@ -134,6 +134,46 @@ export async function uploadExhibit(
     return uploadImage(body.bytes, body.contentType, prefix, signal);
 }
 
+/** Thrown when the uploaded bytes are not an image anything can decode. */
+export class UnreadableImageError extends Error {
+    constructor(cause: unknown) {
+        super("The uploaded photo could not be decoded as an image.", { cause });
+    }
+}
+
+/**
+ * Stores the player's own photo, re-encoded from the decoded pixels.
+ *
+ * The one upload whose bytes come from the caller rather than from the image
+ * model, and the only thing standing between them and an object served from a
+ * public domain the operator owns. The mime allowlist upstream reads a string
+ * the caller chose; the dog check is a model asking what is in the picture, not
+ * a decoder. So decode it here and store what came out: a file carrying anything
+ * besides an image loses it, and the EXIF block - orientation, camera, and the
+ * GPS coordinates of somebody's garden - does not reach the bucket either.
+ *
+ * Fails CLOSED, unlike uploadExhibit: bytes that will not decode are not a photo
+ * with a poor re-encode, they are the case this exists to refuse. The router
+ * answers 400.
+ */
+export async function uploadDogPhoto(
+    bytes: Buffer,
+    prefix: string,
+    signal?: AbortSignal,
+): Promise<StoredImage> {
+    let encoded: Buffer;
+    try {
+        // rotate() before the encode, with no argument: it applies whatever the
+        // EXIF orientation said and then drops it. Without it the metadata that
+        // was holding a phone photo upright is stripped along with the rest and
+        // every such mugshot arrives on its side.
+        encoded = await sharp(bytes).rotate().webp({ quality: EXHIBIT_QUALITY }).toBuffer();
+    } catch (error: unknown) {
+        throw new UnreadableImageError(error);
+    }
+    return uploadImage(encoded, "image/webp", prefix, signal);
+}
+
 /**
  * Width of the strip copy: the courtroom paints a 216px tile, doubled so it
  * stays sharp on a 2x screen. The full exhibit is still what the lightbox opens.

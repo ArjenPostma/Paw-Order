@@ -43,7 +43,7 @@ const publicRecord = ref(props.retry?.isPublic ?? false);
 const strips = computed(() =>
     [
         { key: "mine", heading: "Your cases", cases: props.previous },
-        { key: "public", heading: "Other cases", cases: props.others },
+        { key: "public", heading: "Public cases", cases: props.others },
     ].filter((strip) => strip.cases.length > 0),
 );
 
@@ -51,7 +51,7 @@ const strips = computed(() =>
 // this exists because a rejected upload still costs the caller their one
 // generation per minute, so the round trip is worth not making.
 const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 20 * 1024 * 1024;
 
 /**
  * The honeypot. Off-screen rather than display:none or type="hidden", because a
@@ -104,7 +104,7 @@ function take(file: File | undefined): void {
         return;
     }
     if (file.size > MAX_BYTES) {
-        rejected.value = "That photo is over 8MB. Try a smaller one.";
+        rejected.value = "That photo is over 20MB. Try a smaller one.";
         return;
     }
     rejected.value = null;
@@ -233,7 +233,7 @@ function onDrop(event: DragEvent): void {
                 {{
                     pending
                         ? "Click or drop another photo to swap"
-                        : "or drop one here · JPG, PNG or WebP, up to 8MB"
+                        : "or drop one here · JPG, PNG or WebP, up to 20MB"
                 }}
             </span>
         </label>
@@ -293,7 +293,7 @@ function onDrop(event: DragEvent): void {
                              see rememberCase. The placard stands in for it. -->
                         <!-- width/height so the strip reserves the square
                              before the image lands: these are the player's own
-                             uploads at up to 1024px (and at the full 8MB when
+                             uploads at up to 1024px (and at the full 20MB when
                              downscale had to give up), painted into a 96px
                              tile. -->
                         <img

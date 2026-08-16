@@ -12,7 +12,8 @@ import { positiveIntEnv } from "@/config/env";
 import { AppDataSource } from "@/database_bundle/util/data_source";
 import { CaseEntity } from "@/cases_bundle/models/case_entity";
 import { GenerationFailure, generateCaseBible } from "@/cases_bundle/services/case_generator";
-import { deleteImage, uploadImage } from "@/storage/r2";
+import { deleteImage, uploadDogPhoto } from "@/storage/r2";
+import { generationDailyBudget } from "@/http/generation_budget";
 
 /**
  * Concurrent generations, across all callers. The per-ip rate limiter caps how
@@ -20,7 +21,7 @@ import { deleteImage, uploadImage } from "@/storage/r2";
  * at once, which is the thing that costs money. Env-tunable so a load test can
  * raise it.
  */
-const MAX_CONCURRENT = positiveIntEnv("GENERATION_MAX_CONCURRENT", 3);
+const maxConcurrent = (): number => positiveIntEnv("GENERATION_MAX_CONCURRENT", 3);
 /**
  * A hung model call would otherwise leave a row PENDING forever and hold a
  * concurrency slot with it, so every generation gets a deadline.
@@ -62,12 +63,12 @@ export class GenerationBusyError extends Error {
 }
 
 /**
- * Lets the router reject a busy request before multer buffers 8MB and before
+ * Lets the router reject a busy request before multer buffers the body and before
  * the daily budget is charged. createCase still re-checks: this is an early
  * out, not the guard - two requests can pass it and only one gets the slot.
  */
 export function generationSlotsAvailable(): boolean {
-    return inFlight < MAX_CONCURRENT;
+    return inFlight < maxConcurrent();
 }
 
 /** Test seam for the slot accounting, which no HTTP test can observe directly. */
@@ -123,7 +124,7 @@ export async function createCase(
     photoHash: string | null,
     isPublic: boolean,
 ): Promise<CaseAccepted> {
-    if (inFlight >= MAX_CONCURRENT) {
+    if (inFlight >= maxConcurrent()) {
         throw new GenerationBusyError();
     }
     inFlight += 1;
@@ -258,7 +259,10 @@ async function insertPendingCase(
     photoHash: string | null,
     isPublic: boolean,
 ): Promise<{ id: string; photoUrl: string }> {
-    const stored = await uploadImage(photo.bytes, photo.mimeType, "dogs");
+    // Re-encoded from the decoded pixels rather than stored as sent: these are
+    // the only bytes in the bucket the caller chose. Throws UnreadableImageError
+    // if they do not decode, which the router answers 400.
+    const stored = await uploadDogPhoto(photo.bytes, "dogs");
     try {
         const saved = await repository().save(
             repository().create({
@@ -397,6 +401,12 @@ async function runGeneration(
     const timer = setTimeout(() => {
         controller.abort();
     }, TIMEOUT_MS);
+    // Whether this generation got as far as paying for images. The daily budget
+    // was charged before the 202 went out, and a generation that dies having
+    // bought nothing must not keep the slot: the model being down for ten
+    // minutes would otherwise spend the whole day's budget on failures and close
+    // the court to everyone for 24 hours, at zero cost.
+    let paidForImages = false;
 
     try {
         const { bible, storedKeys } = await generateCaseBible(
@@ -405,6 +415,7 @@ async function runGeneration(
             defendantName,
             controller.signal,
         );
+        paidForImages = storedKeys.length > 0;
         try {
             await repository().update(id, {
                 bible,
@@ -440,10 +451,16 @@ async function runGeneration(
         }
 
         if (failure && failure.storedKeys.length > 0) {
+            paidForImages = true;
             console.error(
                 `[paw-order-api] case ${id}: reclaiming ${String(failure.storedKeys.length)} orphaned images`,
             );
             await Promise.all(failure.storedKeys.map(deleteImage));
+        }
+        if (!paidForImages) {
+            // Nothing was rendered, so the slot bought nothing. refundOnRejection
+            // cannot see this: the response said 202 long before the failure.
+            generationDailyBudget.release();
         }
         await markFailed(id);
     } finally {

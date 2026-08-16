@@ -12,6 +12,51 @@ interface Bucket {
 }
 
 /**
+ * What a caller is counted as.
+ *
+ * IPv4 is the address itself. IPv6 is the /64 the address sits in, because a
+ * routed /64 is what an ordinary connection is handed: keyed on the full
+ * address, one host rotates through 2^64 of them for free and every per-ip
+ * ceiling here becomes no ceiling at all. The /64 is the smallest unit a caller
+ * cannot pick for themselves.
+ *
+ * Two forms have to survive that: a zone id (`fe80::1%eth0`) is not part of the
+ * address, and an IPv4-mapped address (`::ffff:203.0.113.7`, which is what
+ * Express hands back for an IPv4 client on a dual-stack socket) is an IPv4
+ * caller wearing IPv6 syntax - truncating it to four hextets would file every
+ * IPv4 caller in the world under one bucket.
+ */
+export function bucketKey(rawIp: string | undefined): string {
+    if (!rawIp) {
+        return "unknown";
+    }
+    const [address = ""] = rawIp.split("%");
+    if (!address.includes(":")) {
+        return address;
+    }
+    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
+    if (mapped?.[1]) {
+        return mapped[1];
+    }
+
+    const [head = "", tail] = address.split("::");
+    const headParts = head === "" ? [] : head.split(":");
+    const tailParts = tail === undefined || tail === "" ? [] : tail.split(":");
+    const parts =
+        tail === undefined
+            ? headParts
+            : [
+                  ...headParts,
+                  ...Array<string>(Math.max(0, 8 - headParts.length - tailParts.length)).fill("0"),
+                  ...tailParts,
+              ];
+    return parts
+        .slice(0, 4)
+        .map((part) => part.toLowerCase().padStart(4, "0"))
+        .join(":");
+}
+
+/**
  * A ceiling, either fixed or read per request.
  *
  * The env-backed ceilings pass a thunk. Read once at module load they were
@@ -124,7 +169,7 @@ export function rateLimit({
         const now = Date.now();
         prune(now);
 
-        const key = req.ip ?? "unknown";
+        const key = bucketKey(req.ip);
         const bucket = buckets.get(key);
         let charged: Bucket;
         if (!bucket || now - bucket.startedAt >= windowMs) {
@@ -157,6 +202,26 @@ export interface DailyBudgetOptions {
 }
 
 /**
+ * A daily budget: the middleware that charges it, plus the way to hand a slot
+ * back once the response has already gone out.
+ */
+export type DailyBudget = RequestHandler & {
+    /**
+     * Returns one charged slot. For work that is accepted with a 202 and then
+     * fails in the background, which refundOnRejection cannot see: by the time
+     * the failure is known the response is long finished and its status code
+     * said yes.
+     *
+     * Not identity-checked against the bucket that was charged, unlike the
+     * rejection refund: a background job can outlive the window it started in,
+     * and refusing the refund then would be the wrong way round. The count > 0
+     * guard is what keeps a late release from lending the new window a slot it
+     * never spent.
+     */
+    release: () => void;
+};
+
+/**
  * Global 24h ceiling on how many cases this process will generate.
  *
  * Mount this LAST, after every check that can reject the request for free. It
@@ -172,10 +237,10 @@ export function dailyBudget({
     // screen renders this directly above those strips.
     message = "The court is closed to new cases today. The cases below are still open.",
     refundOnRejection = false,
-}: DailyBudgetOptions): RequestHandler {
+}: DailyBudgetOptions): DailyBudget {
     let daily: Bucket = { count: 0, startedAt: Date.now() };
 
-    return (_req, res, next) => {
+    const middleware: RequestHandler = (_req, res, next) => {
         const now = Date.now();
         if (now - daily.startedAt >= DAY_MS) {
             daily = { count: 0, startedAt: now };
@@ -192,4 +257,12 @@ export function dailyBudget({
         }
         next();
     };
+
+    return Object.assign(middleware, {
+        release: (): void => {
+            if (daily.count > 0) {
+                daily.count -= 1;
+            }
+        },
+    });
 }
