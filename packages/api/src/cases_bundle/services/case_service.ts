@@ -150,11 +150,15 @@ export async function createCase(
  * one. FAILED deliberately does not - re-uploading a photo whose case fell apart
  * is the player retrying, and they must get a real attempt.
  *
- * isPublic is deliberately not part of the match, and a hit does not change it.
- * Someone uploading a byte-identical photo under the identical name to a case
- * already generated privately is handed that case, and their checkbox does
- * nothing. The alternative is publishing a row on the say-so of a second caller
- * who only proved they hold the same file, which is worse than a rare no-op.
+ * isPublic is deliberately not part of the match, and a hit does not change it,
+ * in EITHER direction. Ticking the box and hitting a case generated privately
+ * does nothing - publishing a row on the say-so of a second caller who only
+ * proved they hold the same file is worse than a rare no-op. Leaving the box
+ * clear and hitting a case someone else published also does nothing, so that
+ * caller is handed a case that is already on the docket and already has a link:
+ * their upload published nothing, but the case they are looking at is public
+ * and the client will say so. Both need the same byte-identical photo under the
+ * same name, which is what makes it rare enough to accept.
  */
 export async function findReusableCase(photoHash: string): Promise<CaseAccepted | null> {
     const entity = await repository().findOne({
@@ -206,11 +210,17 @@ export function slugStem(title: string): string {
     if (cleaned.length <= SLUG_TEXT_MAX) {
         return cleaned || "case";
     }
-    const cut = cleaned.slice(0, SLUG_TEXT_MAX);
+    // MAX + 1, so a separator sitting exactly on the boundary is visible. Cut at
+    // MAX and that separator is the first character not looked at, so the last
+    // word that does fit gets thrown away with the one that does not.
+    const cut = cleaned.slice(0, SLUG_TEXT_MAX + 1);
     const lastWord = cut.lastIndexOf("-");
     // > 0, not >= 0: a single word longer than the budget has no hyphen to cut
-    // back to, and cutting at index 0 would leave nothing at all.
-    return (lastWord > 0 ? cut.slice(0, lastWord) : cut).replace(/-+$/, "") || "case";
+    // back to, and cutting at index 0 would leave nothing at all. No trailing
+    // trim and no fallback needed on this path - separators are collapsed and
+    // the ends already trimmed, so both branches return a non-empty stem that
+    // cannot end in one.
+    return lastWord > 0 ? cut.slice(0, lastWord) : cut.slice(0, SLUG_TEXT_MAX);
 }
 
 /**
@@ -223,8 +233,18 @@ async function generateSlug(title: string): Promise<string> {
     const stem = slugStem(title);
     for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt += 1) {
         const candidate = `${stem}-${randomBytes(3).toString("hex")}`;
-        if (!(await repository().existsBy({ slug: candidate }))) {
-            return candidate;
+        try {
+            if (!(await repository().existsBy({ slug: candidate }))) {
+                return candidate;
+            }
+        } catch (error: unknown) {
+            // The caller runs inside the update whose failure deletes every
+            // exhibit image and fails the case, so a blip on this read - which
+            // guards nothing worse than a 1-in-16.7M shared link - must not be
+            // what throws away a case with all five model calls paid for. Take
+            // the long tail and carry on.
+            console.error("[paw-order-api] could not check slug uniqueness", error);
+            break;
         }
     }
     // Three clashes against 16.7 million per title means the random source is
@@ -460,9 +480,13 @@ async function markFailed(id: string): Promise<void> {
  * "Unnamed" and whose charge is "Pending investigation", and a FAILED one holds
  * whatever it died with. Neither is a case anyone can open.
  *
- * ponytail: full scan, same as the retention sweep - nothing indexes isPublic
- * or createdAt. One anonymous game's table does not warrant a migration; add
- * the index when the scan shows up in query timings.
+ * ponytail: nothing indexes isPublic or createdAt, so this is a sequential scan
+ * plus a sort of the whole table - and unlike the retention sweep, which pays
+ * that once a day from a timer, this one pays it per anonymous request. The
+ * route's max-age reaches browsers only (the api is Railway-direct, not behind
+ * the Pages CDN), so N distinct visitors are N scans. Add the composite index
+ * on (isPublic, status, createdAt), or memoise for the 60s the route already
+ * advertises, when the table is big enough for either to show in query timings.
  */
 export async function listPublicCases(): Promise<PublicCaseSummary[]> {
     const entities = await repository().find({
@@ -476,7 +500,6 @@ export async function listPublicCases(): Promise<PublicCaseSummary[]> {
     return entities.map((entity) => ({
         id: entity.id,
         name: entity.bible.defendant.name,
-        title: entity.bible.crime.title,
         charge: entity.bible.crime.charge,
         photoUrl: entity.bible.defendant.photoUrl,
     }));
@@ -501,6 +524,30 @@ export async function findPublicCaseBySlug(slug: string): Promise<CaseStatusResp
         select: { id: true },
     });
     return entity ? findCaseStatus(entity.id) : null;
+}
+
+/**
+ * Takes a case off the public docket and kills its link.
+ *
+ * The only writer of isPublic outside the upload that created the row, and it
+ * only ever writes false: publication stays one-way for callers, so nobody can
+ * publish someone else's dog, and the operator can still answer an abuse report
+ * before retention deletes the row a year later.
+ *
+ * Keyed on the slug, not the id: the id is on the docket for anyone to read.
+ * The row itself is left alone - the player holding the id in localStorage can
+ * still replay their own case, which is the smallest thing that answers the
+ * complaint. The R2 objects stay too; the bucket's lifecycle rule reaps them.
+ */
+export async function unpublishCase(slug: string): Promise<boolean> {
+    const { affected } = await repository().update(
+        { slug, isPublic: true },
+        { isPublic: false, slug: null },
+    );
+    // Postgres and better-sqlite3 both report a count, but the driver contract
+    // allows null; treat unknown as "nothing matched" so the route answers 404
+    // rather than claiming a takedown it cannot prove.
+    return (affected ?? 0) > 0;
 }
 
 export async function findCaseStatus(id: string): Promise<CaseStatusResponse | null> {

@@ -77,9 +77,30 @@ function isFilledString(value: unknown): value is string {
  * model-supplied string appears inside an error message.
  */
 function quoteModelValue(value: string): string {
-    // eslint-disable-next-line no-control-regex -- stripping control characters is the point
-    const flattened = value.replace(/[\u0000-\u001F\u007F]+/g, " ").trim();
+    const flattened = flatten(value);
     return flattened.length > 60 ? `${flattened.slice(0, 60)}...` : flattened;
+}
+
+/**
+ * One line of visible text, whatever the model wrote.
+ *
+ * Applied to every stored string now, not only to the ones echoed into an error
+ * message: the same prose is rendered on other people's screens - a charge on a
+ * public docket tile, a timeline entry the client splits on its first dash - so
+ * a bidi override inside a title reverses the text around it on a stranger's
+ * home page, and a newline in a timeline entry silently defeats that split. Vue
+ * escapes markup, so this is about text that lies about its own shape and
+ * direction, not about injection.
+ *
+ * Same classes the router takes out of a player-supplied name: C0, DEL, C1, the
+ * soft hyphen, and the invisible formatting and direction characters.
+ */
+const INVISIBLE_CHARACTERS =
+    // eslint-disable-next-line no-control-regex -- taking control characters out is the point
+    /[\u0000-\u001F\u007F-\u009F\u00AD\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+/g;
+
+function flatten(value: string): string {
+    return value.replace(INVISIBLE_CHARACTERS, " ").replace(/\s+/g, " ").trim();
 }
 
 class Checker {
@@ -108,7 +129,7 @@ class Checker {
             this.errors.push(`${path}.${key} must be a non-empty string`);
             return "";
         }
-        const trimmed = value.trim();
+        const trimmed = flatten(value);
         if (trimmed.length > MAX_STRING_LENGTH) {
             this.errors.push(
                 `${path}.${key} must be at most ${String(MAX_STRING_LENGTH)} characters, got ${String(trimmed.length)}`,
@@ -129,8 +150,10 @@ class Checker {
         if (value === null) {
             return null;
         }
-        if (isFilledString(value) && value.trim().length <= MAX_STRING_LENGTH) {
-            return value.trim();
+        // flatten, matching string() above: an id stripped in one place and
+        // merely trimmed in the other would stop resolving against itself.
+        if (isFilledString(value) && flatten(value).length <= MAX_STRING_LENGTH) {
+            return flatten(value);
         }
         this.errors.push(`${path}.${key} must be a non-empty string or an explicit null`);
         return null;
@@ -164,8 +187,8 @@ class Checker {
         }
         const out: string[] = [];
         raw.forEach((item, index) => {
-            if (isFilledString(item) && item.trim().length <= MAX_STRING_LENGTH) {
-                out.push(item.trim());
+            if (isFilledString(item) && flatten(item).length <= MAX_STRING_LENGTH) {
+                out.push(flatten(item));
             } else {
                 this.errors.push(`${path}.${key}[${index}] must be a non-empty string`);
             }
@@ -264,6 +287,13 @@ export function validateFacts(value: unknown): ValidationResult<GeneratedFacts> 
             reliable: check.boolean(source, "reliable", path),
         };
     });
+
+    // The same check evidence gets above. Witness ids are the key the courtroom
+    // renders its statement cards by, so two witnesses sharing one id give Vue
+    // duplicate keys and let it patch the wrong card on a re-render.
+    if (new Set(witnesses.map((witness) => witness.id)).size !== witnesses.length) {
+        check.errors.push("facts.witnesses contains duplicate ids");
+    }
 
     const truthSource = check.record(root.truth, "facts.truth");
     const misleadingEvidenceIds = check.strings(

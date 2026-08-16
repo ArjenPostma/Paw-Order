@@ -76,18 +76,19 @@ export class CaseEntity {
     isPublic!: boolean;
 
     /**
-     * The shareable half of this case's url: "biscuit-a1b2c3", the defendant's
-     * name reduced to url characters plus six random hex.
+     * The shareable half of this case's url: "the-great-cake-heist-a1b2c3", the
+     * generated case TITLE reduced to url characters plus six random hex.
      *
      * Null for a private case, and that is the whole access rule - a case with
      * no slug cannot be reached by GET /link/:slug, because there is no slug to
-     * ask for. Written once, beside isPublic, by the upload that created the
-     * row.
+     * ask for. Written once, with the bible on the READY update rather than at
+     * insert, because the title it is built from does not exist until the
+     * generator has run: a PENDING row's slug is always null.
      *
-     * Indexed but deliberately NOT unique: a collision needs the same name and
+     * Indexed but deliberately NOT unique: a collision needs the same title and
      * the same six hex out of 16.7 million, and the alternative is catching a
      * constraint violation whose error shape differs between the sqlite driver
-     * and Postgres. generateSlug checks for a clash before inserting instead;
+     * and Postgres. generateSlug checks for a clash before writing instead;
      * losing that race costs the older row its link, not its case.
      */
     @Index()

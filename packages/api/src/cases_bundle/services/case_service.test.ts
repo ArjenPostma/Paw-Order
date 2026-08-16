@@ -71,7 +71,9 @@ describe("slug stems", () => {
         const stem = slugStem("The Extraordinarily Protracted Matter Of The Missing Sausage");
         expect(stem.length).toBeLessThanOrEqual(40);
         // The cut lands between words: no trailing hyphen, and no half word.
-        expect(stem).toBe("the-extraordinarily-protracted-matter");
+        // "of" ends exactly on the budget, and it is kept - looking one
+        // character further is what makes the separator after it visible.
+        expect(stem).toBe("the-extraordinarily-protracted-matter-of");
     });
 
     // One word past the budget has no earlier word to fall back to, so it is

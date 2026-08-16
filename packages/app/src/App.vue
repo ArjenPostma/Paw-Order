@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type {
     PublicCase,
     PublicCaseSummary,
@@ -107,10 +107,13 @@ const otherCases = computed(() => {
  * Bounded and lowercase to match what the api will accept, so a hand-typed path
  * is turned away before it costs a request.
  */
-const CASE_PATH = /^\/case\/([a-z0-9-]{1,64})\/?$/;
+const CASE_PATH = /^\/case\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/;
+/** The api's own cap, so an overlong path is turned away before it costs a request. */
+const MAX_SLUG_LENGTH = 64;
 
 function slugFromLocation(): string | null {
-    return CASE_PATH.exec(window.location.pathname)?.[1] ?? null;
+    const slug = CASE_PATH.exec(window.location.pathname)?.[1];
+    return slug !== undefined && slug.length <= MAX_SLUG_LENGTH ? slug : null;
 }
 
 /**
@@ -122,22 +125,37 @@ function slugFromLocation(): string | null {
  * popstate handler's path, where the location is already what it should be and
  * pushing would fight the back button.
  */
-function showUrl(slug: string | null): void {
+function showUrl(slug: string | null, replace = false): void {
     const path = slug === null ? "/" : `/case/${slug}`;
-    if (window.location.pathname !== path) {
-        window.history.pushState({}, "", path);
+    if (window.location.pathname === path) {
+        return;
     }
+    // replace, for a url that led nowhere: pushing "/" on top of a dead link
+    // leaves the dead link one Back press away, where it fetches, fails and
+    // pushes "/" again - a fixed point the Back button cannot get out of.
+    if (replace) {
+        window.history.replaceState({}, "", path);
+        return;
+    }
+    window.history.pushState({}, "", path);
+}
+
+/** Back and forward move between a case and the home screen, the whole history here. */
+function onPopState(): void {
+    void openFromLocation();
 }
 
 onMounted(() => {
+    window.addEventListener("popstate", onPopState);
     void loadDocket();
     void openFromLocation();
 });
 
-// Back and forward move between a case and the home screen, which is the whole
-// history this app has.
-window.addEventListener("popstate", () => {
-    void openFromLocation();
+// The root component never unmounts in the built app, so this is for the dev
+// server: without it every hot update leaves another listener behind, each
+// answering one Back press against a detached instance.
+onBeforeUnmount(() => {
+    window.removeEventListener("popstate", onPopState);
 });
 
 /**
@@ -149,6 +167,16 @@ window.addEventListener("popstate", () => {
  */
 async function openFromLocation(): Promise<void> {
     const slug = slugFromLocation();
+    if (currentCase.value?.slug === slug && slug !== null) {
+        return;
+    }
+
+    // Bumped before the home branch too, not only before a fetch: a link fetch
+    // still in flight when the player presses Back would otherwise land after
+    // the navigation, open its case and push the url straight back on.
+    run += 1;
+    const thisRun = run;
+
     if (slug === null) {
         // Navigated back out of a case. The url says home, so the app follows.
         if (currentCase.value) {
@@ -156,12 +184,6 @@ async function openFromLocation(): Promise<void> {
         }
         return;
     }
-    if (currentCase.value?.slug === slug) {
-        return;
-    }
-
-    run += 1;
-    const thisRun = run;
     error.value = null;
 
     try {
@@ -190,7 +212,7 @@ async function openFromLocation(): Promise<void> {
 
 /** A link that leads nowhere: back to the envelope, and out of the address bar. */
 function dropLink(): void {
-    showUrl(null);
+    showUrl(null, true);
     error.value = "That case is no longer on file.";
 }
 

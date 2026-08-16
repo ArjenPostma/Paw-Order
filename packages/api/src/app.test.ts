@@ -843,7 +843,7 @@ describe("the public docket", () => {
         const docket = await request(app).get("/api/cases/public");
         const entry = docket.body.find((candidate: { id: string }) => candidate.id === id);
         expect(entry).toBeDefined();
-        expect(Object.keys(entry).sort()).toEqual(["charge", "id", "name", "photoUrl", "title"]);
+        expect(Object.keys(entry).sort()).toEqual(["charge", "id", "name", "photoUrl"]);
         expect(entry.name).toBe("Biscuit");
         expect(entry.charge).toBeTruthy();
 
@@ -851,6 +851,40 @@ describe("the public docket", () => {
         expect(wire).not.toContain("misleadingEvidenceIds");
         expect(wire).not.toContain("effects");
         expect(wire).not.toContain("visualFacts");
+    });
+
+    // Newest first. Backdated rather than raced: two cases created a
+    // millisecond apart would make the assertion a coin toss on a fast machine.
+    it("lists the newest case first", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const older = await readyCase("Biscuit", "true");
+        const newer = await readyCase("Rex", "true");
+        await repository.update(older, { createdAt: new Date(Date.now() - 60_000) });
+
+        const ids = await docketIds();
+        expect(ids.indexOf(newer)).toBeLessThan(ids.indexOf(older));
+    });
+
+    // Last in this block on purpose: it fills the docket, so anything asserting
+    // on a specific case afterwards would find it pushed off the end.
+    it("serves at most a dockets worth, however many are public", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const seed = await repository.findOneByOrFail({ status: "READY" });
+        // Inserted directly: thirteen uploads is thirteen generations to prove
+        // one LIMIT, and the route reads the column, not the upload path.
+        for (let extra = 0; extra < 13; extra += 1) {
+            await repository.save(
+                repository.create({
+                    status: "READY",
+                    bible: seed.bible,
+                    photoHash: null,
+                    isPublic: true,
+                    slug: `docket-cap-${String(extra)}`,
+                }),
+            );
+        }
+
+        expect((await docketIds()).length).toBe(12);
     });
 });
 
@@ -900,6 +934,11 @@ describe("shared case links", () => {
         expect(byLink.status).toBe(200);
         expect(byLink.body).toEqual(byId.body);
         expect(byLink.body.truth).toBeUndefined();
+        // The same header the id route serves for a finished case. Bodies being
+        // equal says nothing about headers, and this one is the difference
+        // between a shared link that costs one request and one that costs every
+        // reader a round trip.
+        expect(byLink.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
     });
 
     // The rule the whole design rests on. A slug is the only handle a link has,
@@ -932,7 +971,99 @@ describe("shared case links", () => {
         ]) {
             const response = await request(app).get(`/api/cases/link/${encodeURIComponent(slug)}`);
             expect(response.status).toBe(404);
+            // Every miss, the malformed ones included. A case published a
+            // moment from now must not be answered "not found" out of a cache,
+            // and an uncontrolled 404 is heuristically cacheable by any shared
+            // proxy on the path.
+            expect(response.headers["cache-control"]).toBe("no-store");
         }
+    });
+
+    // Publication is one-way for callers, so this route is the only answer to
+    // an abuse report short of SQL against production. Everything it refuses is
+    // refused as a plain 404: a 401 would confirm the route is armed and a 403
+    // would confirm the slug.
+    describe("operator takedown", () => {
+        const TOKEN = "test-admin-token";
+
+        async function withToken<T>(body: () => Promise<T>): Promise<T> {
+            const previous = process.env.ADMIN_TOKEN;
+            process.env.ADMIN_TOKEN = TOKEN;
+            try {
+                return await body();
+            } finally {
+                if (previous === undefined) {
+                    delete process.env.ADMIN_TOKEN;
+                } else {
+                    process.env.ADMIN_TOKEN = previous;
+                }
+            }
+        }
+
+        it("takes a case off the docket and kills its link, leaving the case playable", async () => {
+            const id = await readyCase("Biscuit", true);
+            const ready = await request(app).get(`/api/cases/${id}`);
+            const slug: string = ready.body.slug;
+
+            const removed = await withToken(() =>
+                request(app).delete(`/api/cases/link/${slug}`).set("x-admin-token", TOKEN),
+            );
+
+            expect(removed.status).toBe(204);
+            expect((await request(app).get(`/api/cases/link/${slug}`)).status).toBe(404);
+            const docket = await request(app).get("/api/cases/public");
+            expect(docket.body.map((entry: { id: string }) => entry.id)).not.toContain(id);
+            // The player who made it keeps it: their strip replays by id.
+            const stillPlayable = await request(app).get(`/api/cases/${id}`);
+            expect(stillPlayable.status).toBe(200);
+            expect(stillPlayable.body.status).toBe("READY");
+            expect(stillPlayable.body.slug).toBeNull();
+        });
+
+        it("refuses a wrong token, and refuses every caller when none is configured", async () => {
+            const id = await readyCase("Biscuit", true);
+            const slug: string = (await request(app).get(`/api/cases/${id}`)).body.slug;
+
+            const wrong = await withToken(() =>
+                request(app).delete(`/api/cases/link/${slug}`).set("x-admin-token", "not-it"),
+            );
+            expect(wrong.status).toBe(404);
+
+            const none = await withToken(() => request(app).delete(`/api/cases/link/${slug}`));
+            expect(none.status).toBe(404);
+
+            // An unset ADMIN_TOKEN means the route is off, never that every
+            // caller is an operator. Asserted with no header AND with one,
+            // because "" == undefined logic would open the door to the latter.
+            const previous = process.env.ADMIN_TOKEN;
+            delete process.env.ADMIN_TOKEN;
+            try {
+                expect((await request(app).delete(`/api/cases/link/${slug}`)).status).toBe(404);
+                const guessed = await request(app)
+                    .delete(`/api/cases/link/${slug}`)
+                    .set("x-admin-token", "");
+                expect(guessed.status).toBe(404);
+            } finally {
+                if (previous !== undefined) {
+                    process.env.ADMIN_TOKEN = previous;
+                }
+            }
+
+            // Still on the docket and still linkable: nothing above worked.
+            expect((await request(app).get(`/api/cases/link/${slug}`)).status).toBe(200);
+        });
+
+        it("404s a takedown for a case that was never public", async () => {
+            const id = await readyCase("Rex", false);
+            expect((await request(app).get(`/api/cases/${id}`)).body.slug).toBeNull();
+
+            const missing = await withToken(() =>
+                request(app)
+                    .delete("/api/cases/link/no-such-case-000000")
+                    .set("x-admin-token", TOKEN),
+            );
+            expect(missing.status).toBe(404);
+        });
     });
 
     // A link to a case whose generation fell apart would open an empty

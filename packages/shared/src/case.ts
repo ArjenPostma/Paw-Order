@@ -214,18 +214,24 @@ export type PublicCase = Pick<CaseBible, "defendant" | "crime"> & {
  * One tile on the public docket: a case whose player chose to enter it into the
  * public record, as the home page lists it.
  *
- * Deliberately not derived from CaseBible. It is the same five fields the
- * client's own localStorage strip already holds, so both strips render through
- * one tile - and being written out by hand means a field added to the bible
+ * Deliberately not derived from CaseBible. It is the fields the tile actually
+ * draws and nothing else - written out by hand so a field added to the bible
  * cannot arrive here, which is the whole point of a list served to people who
- * did not generate these cases.
+ * did not generate these cases. The client's own localStorage strip holds a
+ * superset, so one tile renders both.
+ *
+ * `truth?: never` for the reason PublicCase and CaseAccepted carry it, and it
+ * matters most here: this is the payload strangers receive. Without it a later
+ * `{ ...entity.bible, id, name, charge, photoUrl }` in listPublicCases would
+ * typecheck - object spread suppresses excess-property checking - and ship the
+ * answer for twelve cases at once.
  */
 export interface PublicCaseSummary {
     id: string;
     name: string;
-    title: string;
     charge: string;
     photoUrl: string;
+    truth?: never;
 }
 
 export const CASE_STATUSES = ["PENDING", "READY", "FAILED"] as const;

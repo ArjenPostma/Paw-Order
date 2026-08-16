@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
 import multer, { MulterError } from "multer";
 import { RegExpMatcher, englishDataset, englishRecommendedTransformers } from "obscenity";
 import { positiveIntEnv } from "@/config/env";
@@ -12,6 +12,7 @@ import {
     findReusableCase,
     generationSlotsAvailable,
     listPublicCases,
+    unpublishCase,
 } from "@/cases_bundle/services/case_service";
 import { DogCheckBusyError, looksLikeDog } from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
@@ -562,6 +563,12 @@ const MAX_SLUG_LENGTH = 64;
  * link" a property of the data rather than a rule the client is trusted with.
  */
 casesRouter.get("/link/:slug", async (req, res) => {
+    // Set before the guards so every arm carries it: a case published a moment
+    // from now must not be answered "not found" out of a cache, and a malformed
+    // slug's 404 is otherwise heuristically cacheable by any shared proxy. The
+    // hit overwrites it below.
+    res.setHeader("Cache-Control", "no-store");
+
     const slug = req.params.slug;
     if (typeof slug !== "string" || slug.length > MAX_SLUG_LENGTH || !SLUG_PATTERN.test(slug)) {
         res.status(404).json({ error: "Case not found." });
@@ -570,18 +577,77 @@ casesRouter.get("/link/:slug", async (req, res) => {
 
     const result = await findPublicCaseBySlug(slug);
     if (!result) {
-        // no-store on the miss: a case published a moment from now must not be
-        // answered "not found" out of a cache for the next year.
-        res.setHeader("Cache-Control", "no-store");
         res.status(404).json({ error: "Case not found." });
         return;
     }
 
-    // Only READY resolves here, so this is the same immutable body GET /:id
-    // serves for a finished case.
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    // Gated on the status, not on the lookup: findPublicCaseBySlug matches only
+    // READY rows, but findCaseStatus answers FAILED for a READY row whose
+    // rootNodeId is missing from its own nodes, and caching THAT immutable for
+    // a year would make one corrupt bible permanent in every browser that
+    // opened the link. Same rule GET /:id follows.
+    if (result.status === "READY") {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    }
     res.json(result);
 });
+
+/**
+ * The operator's takedown, and the only writer of isPublic outside the upload.
+ *
+ * Publication is deliberately one-way for callers - nothing lets a visitor
+ * change someone else's case - which leaves no way at all to answer an abuse
+ * report about a photo on the docket short of SQL against production. This is
+ * that way, and it is off unless ADMIN_TOKEN is set.
+ *
+ * Every rejection is the same 404 the unknown-slug arm returns: a 401 would
+ * confirm the endpoint exists and is armed, and a 403 would confirm the slug.
+ */
+casesRouter.delete("/link/:slug", perIpDocketLimiter, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    const slug = req.params.slug;
+    if (
+        !isOperator(req) ||
+        typeof slug !== "string" ||
+        slug.length > MAX_SLUG_LENGTH ||
+        !SLUG_PATTERN.test(slug)
+    ) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    if (!(await unpublishCase(slug))) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+    res.status(204).end();
+});
+
+/**
+ * Whether the caller holds the operator token.
+ *
+ * Compared with timingSafeEqual rather than ===, which returns on the first
+ * differing byte and leaks the prefix to anyone willing to measure. Length is
+ * checked first because timingSafeEqual throws on a length mismatch - that
+ * comparison is not constant time, but the length of a secret is not the secret.
+ *
+ * Absent ADMIN_TOKEN means the route is off, not that every caller is an
+ * operator: an unset env var must never open a door.
+ */
+function isOperator(req: Request): boolean {
+    const expected = process.env.ADMIN_TOKEN;
+    if (!expected) {
+        return false;
+    }
+    const offered = req.get("x-admin-token");
+    if (typeof offered !== "string") {
+        return false;
+    }
+    const a = Buffer.from(offered);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+}
 
 casesRouter.get("/:id", async (req, res) => {
     const id = req.params.id;

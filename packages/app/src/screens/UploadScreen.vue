@@ -275,11 +275,18 @@ function onDrop(event: DragEvent): void {
                     >
                         <!-- Absent when the api inlined the photo as a data URL:
                              see rememberCase. The placard stands in for it. -->
+                        <!-- width/height so the strip reserves the square
+                             before the image lands: these are the player's own
+                             uploads at up to 1024px (and at the full 8MB when
+                             downscale had to give up), painted into a 96px
+                             tile. -->
                         <img
                             v-if="played.photoUrl"
                             class="prior__photo"
                             :src="played.photoUrl"
                             alt=""
+                            width="96"
+                            height="96"
                             loading="lazy"
                         />
                         <!-- Array.from, not slice: a name starting with an
