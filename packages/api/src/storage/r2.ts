@@ -93,6 +93,48 @@ export async function uploadImage(
 }
 
 /**
+ * Quality of the stored exhibit. Measured against real generated exhibits: the
+ * image model returns 1024px jpeg at near-lossless quality, ~450-700KB, and this
+ * lands the same frame at 19-127KB - roughly an eighth - for a mean per-channel
+ * error of under 2/255. The lightbox is where a player reads a clock face or a
+ * label, so the fidelity is the point, not the bytes; 82 was picked because the
+ * error at 90 was not measurably better on the same images.
+ */
+const EXHIBIT_QUALITY = 82;
+
+/**
+ * Stores an exhibit, re-encoded to webp when that comes out smaller.
+ *
+ * The size is a page-load number more than a storage one - a case is four to six
+ * exhibits, and the lightbox opens the full frame.
+ *
+ * A re-encode that throws stores what the model returned instead: an exhibit with
+ * a big image is worth more than no exhibit. The upload itself is deliberately
+ * outside that catch, so a failed PUT stays a failure rather than retrying with
+ * different bytes.
+ */
+export async function uploadExhibit(
+    bytes: Buffer,
+    contentType: string,
+    prefix: string,
+    signal?: AbortSignal,
+): Promise<StoredImage> {
+    let body = { bytes, contentType };
+    try {
+        const webp = await sharp(bytes).webp({ quality: EXHIBIT_QUALITY }).toBuffer();
+        if (webp.length < bytes.length) {
+            body = { bytes: webp, contentType: "image/webp" };
+        }
+    } catch (error: unknown) {
+        console.error(
+            "[paw-order-api] exhibit re-encode failed; storing what the model returned",
+            error,
+        );
+    }
+    return uploadImage(body.bytes, body.contentType, prefix, signal);
+}
+
+/**
  * Width of the strip copy: the courtroom paints a 216px tile, doubled so it
  * stays sharp on a 2x screen. The full exhibit is still what the lightbox opens.
  */

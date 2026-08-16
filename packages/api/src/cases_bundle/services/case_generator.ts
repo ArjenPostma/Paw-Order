@@ -14,7 +14,7 @@ import {
 } from "@/cases_bundle/services/case_prompt";
 import { validateFacts, validateTree } from "@/cases_bundle/services/case_validator";
 import type { ValidationResult } from "@/cases_bundle/services/case_validator";
-import { uploadImage, uploadThumbnail } from "@/storage/r2";
+import { uploadExhibit, uploadThumbnail } from "@/storage/r2";
 
 export interface GeneratedCase {
     bible: CaseBible;
@@ -138,7 +138,7 @@ export async function renderEvidence(
     const results = await Promise.allSettled(
         evidence.map(async (exhibit) => {
             const image = await generateImage(exhibit.imagePrompt, photo, signal);
-            const full = await uploadImage(image.bytes, image.mimeType, "evidence", signal);
+            const full = await uploadExhibit(image.bytes, image.mimeType, "evidence", signal);
             // Sequential, not concurrent: the resize is CPU work on bytes the
             // upload above already holds, and every exhibit in the case is
             // running this same block at once.

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Evidence } from "@paw-order/shared";
 import { readScreening, renderEvidence } from "@/cases_bundle/services/case_generator";
-import { uploadImage, uploadThumbnail } from "@/storage/r2";
+import { uploadExhibit, uploadThumbnail } from "@/storage/r2";
 import { generateImage } from "@/ai/gemini";
 
 // The model call and the bucket are both mocked: what is under test is the
@@ -17,7 +17,7 @@ vi.mock("@/ai/gemini", () => ({
 }));
 
 vi.mock("@/storage/r2", () => ({
-    uploadImage: vi.fn(),
+    uploadExhibit: vi.fn(),
     uploadThumbnail: vi.fn(),
 }));
 
@@ -95,10 +95,10 @@ describe("renderEvidence", () => {
             bytes: Buffer.from("image bytes"),
             mimeType: "image/png",
         });
-        vi.mocked(uploadImage).mockImplementation((_bytes, _type, prefix) =>
+        vi.mocked(uploadExhibit).mockImplementation((_bytes, _type, prefix) =>
             Promise.resolve({
-                url: `https://cdn.test/${prefix}/full.png`,
-                key: `${prefix}/full.png`,
+                url: `https://cdn.test/${prefix}/full.webp`,
+                key: `${prefix}/full.webp`,
             }),
         );
         vi.mocked(uploadThumbnail).mockImplementation((_bytes, prefix) =>
@@ -112,10 +112,10 @@ describe("renderEvidence", () => {
     it("gives every exhibit a full image and a strip copy, and hands back both keys", async () => {
         const result = await renderEvidence([exhibit("E1")], photo, new AbortController().signal);
 
-        expect(result.evidence[0]?.imageUrl).toBe("https://cdn.test/evidence/full.png");
+        expect(result.evidence[0]?.imageUrl).toBe("https://cdn.test/evidence/full.webp");
         expect(result.evidence[0]?.thumbUrl).toBe("https://cdn.test/evidence/thumb.webp");
         // Both, or the one left out is a paid object nothing can reclaim.
-        expect(result.storedKeys).toStrictEqual(["evidence/full.png", "evidence/thumb.webp"]);
+        expect(result.storedKeys).toStrictEqual(["evidence/full.webp", "evidence/thumb.webp"]);
     });
 
     it("keeps the exhibit when only the strip copy fails", async () => {
@@ -124,9 +124,9 @@ describe("renderEvidence", () => {
         const result = await renderEvidence([exhibit("E1")], photo, new AbortController().signal);
 
         // A failed resize costs bytes on the strip, never the exhibit itself.
-        expect(result.evidence[0]?.imageUrl).toBe("https://cdn.test/evidence/full.png");
+        expect(result.evidence[0]?.imageUrl).toBe("https://cdn.test/evidence/full.webp");
         expect(result.evidence[0]?.thumbUrl).toBeNull();
-        expect(result.storedKeys).toStrictEqual(["evidence/full.png"]);
+        expect(result.storedKeys).toStrictEqual(["evidence/full.webp"]);
     });
 
     it("leaves an exhibit pictureless when its image fails, and keeps the others", async () => {
@@ -142,6 +142,6 @@ describe("renderEvidence", () => {
 
         expect(result.evidence[0]?.imageUrl).toBeNull();
         expect(result.evidence[0]?.thumbUrl).toBeNull();
-        expect(result.evidence[1]?.imageUrl).toBe("https://cdn.test/evidence/full.png");
+        expect(result.evidence[1]?.imageUrl).toBe("https://cdn.test/evidence/full.webp");
     });
 });

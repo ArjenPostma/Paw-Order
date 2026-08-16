@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import sharp from "sharp";
 import type { Metadata } from "sharp";
-import { uploadThumbnail } from "@/storage/r2";
+import { uploadExhibit, uploadThumbnail } from "@/storage/r2";
 
 /**
  * Under APP_ENV=test uploadImage writes nothing and answers a data URL, so these
@@ -19,6 +19,40 @@ async function png(width: number, height: number): Promise<Buffer> {
         .png()
         .toBuffer();
 }
+
+/** Shaped like what the image model returns: 1024px jpeg, quality left high. */
+async function jpeg(): Promise<Buffer> {
+    return sharp({
+        create: {
+            width: 1024,
+            height: 1024,
+            channels: 3,
+            background: { r: 0, g: 0, b: 0 },
+            noise: { type: "gaussian", mean: 128, sigma: 30 },
+        },
+    })
+        .jpeg({ quality: 100 })
+        .toBuffer();
+}
+
+describe("uploadExhibit", () => {
+    it("stores the exhibit as webp, smaller than what the model returned", async () => {
+        const original = await jpeg();
+
+        const stored = await uploadExhibit(original, "image/jpeg", "evidence");
+
+        const metadata = await decode(stored.url);
+        expect(metadata.format).toBe("webp");
+        expect(metadata.width).toBe(1024);
+        expect(metadata.size).toBeLessThan(original.length);
+    });
+
+    it("stores what the model returned when the re-encode cannot read the bytes", async () => {
+        const stored = await uploadExhibit(Buffer.from("not an image"), "image/png", "evidence");
+
+        expect(stored.url.startsWith("data:image/png;base64,")).toBe(true);
+    });
+});
 
 describe("uploadThumbnail", () => {
     it("resizes a full exhibit down to the strip width as webp", async () => {
