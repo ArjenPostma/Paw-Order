@@ -1,4 +1,9 @@
-import type { CaseAccepted, CaseStatusResponse, TurnResponse } from "@paw-order/shared";
+import type {
+    CaseAccepted,
+    CaseStatusResponse,
+    PublicCaseSummary,
+    TurnResponse,
+} from "@paw-order/shared";
 
 // VITE_API_URL is build-time: empty in dev (the Vite proxy makes /api
 // same-origin), the Railway api origin in the Cloudflare Pages build.
@@ -75,7 +80,11 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 /** Returns as soon as the case has an id. The case itself is still generating. */
-export async function createCase(photo: File, name: string): Promise<CaseAccepted> {
+export async function createCase(
+    photo: File,
+    name: string,
+    isPublic: boolean,
+): Promise<CaseAccepted> {
     const body = new FormData();
     // Before the photo, which is the order multer's own docs ask for: a field
     // that arrives after the file is not guaranteed to be on req.body while the
@@ -83,22 +92,23 @@ export async function createCase(photo: File, name: string): Promise<CaseAccepte
     if (name) {
         body.append("name", name);
     }
+    // Sent only when ticked, for the same reason: an absent field is the api's
+    // default, and a case is private unless the player said otherwise. The
+    // api's multer limits count these - two text fields, no more.
+    if (isPublic) {
+        body.append("public", "true");
+    }
     body.append("photo", photo);
     const response = await fetch(apiUrl("/api/cases"), { method: "POST", body });
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseAccepted;
 }
 
-/**
- * `fresh` revalidates instead of reading the browser's own cache. A READY case
- * answers `immutable, max-age=31536000`, which is right for the poll loop and
- * wrong for replay: a case the api has since dropped would be served from disk
- * forever, so the tile could never be found dead and removed.
- */
-export async function fetchCase(id: string, fresh = false): Promise<CaseStatusResponse> {
+/** Both case reads. An id and a link answer the same body from the same code. */
+async function getCase(path: string, fresh: boolean): Promise<CaseStatusResponse> {
     let response;
     try {
-        response = await fetch(apiUrl(`/api/cases/${id}`), {
+        response = await fetch(apiUrl(path), {
             cache: fresh ? "no-cache" : "default",
             signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
@@ -109,6 +119,39 @@ export async function fetchCase(id: string, fresh = false): Promise<CaseStatusRe
     }
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
     return (await readJson(response)) as CaseStatusResponse;
+}
+
+/**
+ * `fresh` revalidates instead of reading the browser's own cache. A READY case
+ * answers `immutable, max-age=31536000`, which is right for the poll loop and
+ * wrong for replay: a case the api has since dropped would be served from disk
+ * forever, so the tile could never be found dead and removed.
+ */
+export function fetchCase(id: string, fresh = false): Promise<CaseStatusResponse> {
+    return getCase(`/api/cases/${id}`, fresh);
+}
+
+/**
+ * The case behind a shared link. Always revalidated, for the same reason a
+ * replay is: this is the first thing a visitor following someone else's link
+ * sees, and a year-old cached copy of a case that has since been deleted would
+ * open a courtroom whose images 404.
+ */
+export function fetchCaseBySlug(slug: string): Promise<CaseStatusResponse> {
+    return getCase(`/api/cases/link/${encodeURIComponent(slug)}`, true);
+}
+
+/**
+ * The public docket. A strip on the home page, so a failure here is not worth
+ * a message: the caller drops the section rather than telling a player that a
+ * list they did not ask for did not load.
+ */
+export async function fetchPublicCases(): Promise<PublicCaseSummary[]> {
+    const response = await fetch(apiUrl("/api/cases/public"), {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- serialization boundary
+    return (await readJson(response)) as PublicCaseSummary[];
 }
 
 /**

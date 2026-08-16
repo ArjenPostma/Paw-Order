@@ -61,6 +61,40 @@ export class CaseEntity {
     @Column({ type: "varchar", length: 64, nullable: true })
     photoHash!: string | null;
 
+    /**
+     * Whether the player entered this case into the public record. Only a
+     * public READY row appears on the docket GET /api/cases/public serves.
+     *
+     * Written once, by the upload that created the row. Nothing else in the api
+     * writes it, and that is deliberate: a case is anonymous, so a route that
+     * flipped this would be trusting whoever holds the id - and the id is what
+     * gets pasted around - with the decision to publish someone else's dog.
+     *
+     * `isPublic`, not `public`: `public` is the default schema name on Postgres.
+     */
+    @Column({ type: "boolean", default: false })
+    isPublic!: boolean;
+
+    /**
+     * The shareable half of this case's url: "the-great-cake-heist-a1b2c3", the
+     * generated case TITLE reduced to url characters plus six random hex.
+     *
+     * Null for a private case, and that is the whole access rule - a case with
+     * no slug cannot be reached by GET /link/:slug, because there is no slug to
+     * ask for. Written once, with the bible on the READY update rather than at
+     * insert, because the title it is built from does not exist until the
+     * generator has run: a PENDING row's slug is always null.
+     *
+     * Indexed but deliberately NOT unique: a collision needs the same title and
+     * the same six hex out of 16.7 million, and the alternative is catching a
+     * constraint violation whose error shape differs between the sqlite driver
+     * and Postgres. generateSlug checks for a clash before writing instead;
+     * losing that race costs the older row its link, not its case.
+     */
+    @Index()
+    @Column({ type: "varchar", length: 64, nullable: true })
+    slug!: string | null;
+
     // TIMESTAMP without time zone (see the generated migration): the stored
     // instant carries no offset, so it is only meaningful because every writer
     // runs UTC. `timestamptz` is not an option - the sqlite driver rejects it

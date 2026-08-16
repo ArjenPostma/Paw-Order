@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import type { PublicCase } from "@paw-order/shared";
+import CaseTimeline from "@/components/CaseTimeline.vue";
+import ShareLink from "@/components/ShareLink.vue";
 
 const props = defineProps<{ currentCase: PublicCase }>();
 defineEmits<{ enter: []; leave: [] }>();
@@ -55,18 +57,7 @@ onMounted(() => headlineRef.value?.focus());
 
             <section class="timeline">
                 <h2 class="field-label">The prosecution's timeline</h2>
-                <ol class="timeline__list">
-                    <!-- Keyed by position: the entries are model prose with no
-                         uniqueness constraint, and two identical lines would
-                         collide on a text key. -->
-                    <li
-                        v-for="(entry, index) in currentCase.crime.timeline"
-                        :key="`t${index}`"
-                        class="timeline__entry"
-                    >
-                        {{ entry }}
-                    </li>
-                </ol>
+                <CaseTimeline :entries="currentCase.crime.timeline" />
             </section>
 
             <button class="enter" type="button" @click="$emit('enter')">Begin the defense</button>
@@ -84,6 +75,11 @@ onMounted(() => headlineRef.value?.focus());
             <button class="leave" type="button" @click="$emit('leave')">
                 &larr; Back to the front desk
             </button>
+            <!-- Only a case entered into the public record has a slug, so this
+                 is also the answer to whether it may be shared at all. Sharing
+                 from here sends the case, not a result: whoever opens it
+                 defends the dog themselves. -->
+            <ShareLink v-if="currentCase.slug" :slug="currentCase.slug" />
         </p>
     </main>
 </template>
@@ -100,8 +96,15 @@ onMounted(() => headlineRef.value?.focus());
 
 /* Sits on the same left edge as the file below it, which is what makes it read
    as a way out of this sheet rather than a control on the page. */
+/* Leaving on one side, sharing on the other: the two things to do with this
+   sheet that are not entering court. */
 .leave-row {
     order: -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
     width: min(56rem, 100%);
     margin: 0 0 0.6rem;
 }
@@ -222,24 +225,15 @@ onMounted(() => headlineRef.value?.focus());
     color: var(--stamp);
 }
 
+/* The sheet reads at its own size; CaseTimeline inherits it. */
 .timeline {
     border-top: var(--rule);
     padding-top: 1rem;
-}
-
-.timeline__list {
-    list-style: none;
-    margin: 0.5rem 0 0;
-    padding: 0;
-    display: grid;
-    gap: 0.25rem;
-}
-
-.timeline__entry {
-    font-family: var(--transcript);
     font-size: 0.9375rem;
-    padding-left: 1rem;
-    border-left: 2px solid var(--tape);
+}
+
+.timeline .field-label {
+    margin-bottom: 0.75rem;
 }
 
 .enter {

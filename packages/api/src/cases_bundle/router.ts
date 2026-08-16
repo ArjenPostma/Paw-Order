@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
 import multer, { MulterError } from "multer";
 import { RegExpMatcher, englishDataset, englishRecommendedTransformers } from "obscenity";
 import { positiveIntEnv } from "@/config/env";
@@ -8,8 +8,11 @@ import {
     GenerationBusyError,
     createCase,
     findCaseStatus,
+    findPublicCaseBySlug,
     findReusableCase,
     generationSlotsAvailable,
+    listPublicCases,
+    unpublishCase,
 } from "@/cases_bundle/services/case_service";
 import { DogCheckBusyError, looksLikeDog } from "@/cases_bundle/services/case_generator";
 import { DEFAULT_DEFENDANT_NAME } from "@/cases_bundle/services/case_prompt";
@@ -56,13 +59,18 @@ const upload = multer({
     storage: multer.memoryStorage(),
     // parts is one above the real part count, because busboy's counter rejects a
     // lone file part at parts:1. fields is what actually stops the "one tiny file
-    // plus 100k text fields" body, files:1 the extra files. fields:1 is the
-    // optional dog name and nothing else; busboy's own 1MB fieldSize default
-    // bounds its length, and sanitiseName cuts it to MAX_NAME_LENGTH after that.
-    // Not tightened here on purpose: a fieldSize violation is a MulterError, and
-    // every MulterError answers "a photo is required", which an over-long name
-    // is not.
-    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 3, fields: 1 },
+    // plus 100k text fields" body, files:1 the extra files. fields:2 is the
+    // optional dog name and the public-record checkbox, and nothing else;
+    // busboy's own 1MB fieldSize default bounds their length, and sanitiseName
+    // cuts the name to MAX_NAME_LENGTH after that. Not tightened here on purpose:
+    // a fieldSize violation is a MulterError, and every MulterError answers "a
+    // photo is required", which an over-long name is not.
+    //
+    // Both counts are exact, so they are load-bearing in the other direction
+    // too: leaving fields at 1 when the checkbox was added would have made every
+    // upload that carried a name AND a checkbox a MulterError, answered "A photo
+    // is required" for a request that had one.
+    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 4, fields: 2 },
     fileFilter: (_req, file, callback) => {
         // Client-declared mime type is a hint, not proof - it caps the obvious
         // junk; the size limit is what actually bounds the request.
@@ -210,6 +218,19 @@ function sanitiseName(body: unknown): string {
     // sheet, in the courtroom caption and on the verdict line.
     const cut = Array.from(cleaned).slice(0, MAX_NAME_LENGTH).join("").trim();
     return cut || DEFAULT_DEFENDANT_NAME;
+}
+
+/**
+ * Whether the player ticked "Enter into the public record".
+ *
+ * multipart carries no booleans - the field arrives as a string or not at all -
+ * and the client omits it entirely when the box is clear. Only the exact string
+ * counts: publishing a player's dog is not something to infer from "1", "on" or
+ * a field that happens to be present, and an absent field is the safe default
+ * either way.
+ */
+function wantsPublicRecord(body: unknown): boolean {
+    return typeof body === "object" && body !== null && "public" in body && body.public === "true";
 }
 
 // The player's name for their dog is written through the whole bible - the
@@ -421,6 +442,7 @@ casesRouter.post(
                 // request without a file never gets past requirePhoto. Stored
                 // so the NEXT identical upload finds this case.
                 req.photoHash ?? null,
+                wantsPublicRecord(req.body),
             );
             res.status(202).json(accepted);
         } catch (error: unknown) {
@@ -496,6 +518,136 @@ casesRouter.post("/:id/turn", perIpTurnLimiter, async (req, res) => {
     }
     res.json(outcome);
 });
+
+/**
+ * Cheap per row, but not free: every tile is a full row read whose bible is
+ * JSON.parsed to yield five strings, and the list is public, so nothing else
+ * bounds how often it is asked for. 30 a minute is far above a home page that
+ * fetches it once on load.
+ */
+const perIpDocketLimiter = rateLimit({
+    windowMs: 60_000,
+    max: positiveIntEnv("DOCKET_MAX_PER_MINUTE", 30),
+});
+
+/**
+ * The public docket: cases their players entered into the public record.
+ *
+ * Mounted ABOVE GET /:id and it has to stay there - Express takes the first
+ * route that matches, so below it "public" is read as a case id and the uuid
+ * guard answers "Case not found."
+ */
+casesRouter.get("/public", perIpDocketLimiter, async (_req, res) => {
+    // Not immutable like a READY case: the list changes as cases are published
+    // and as old ones age out of retention. A minute is short enough that a
+    // player's own case appears while they are still on the page, and long
+    // enough that a reload loop costs one query rather than one per hit.
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.json(await listPublicCases());
+});
+
+/**
+ * A shared link's slug: "biscuit-a1b2c3". Same job as UUID_PATTERN on the id
+ * routes - it keeps a junk path from reaching a query, and it bounds the length
+ * of a string an anonymous caller puts in a WHERE clause.
+ */
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_SLUG_LENGTH = 64;
+
+/**
+ * The case behind a shared link. Mounted above /:id like the docket, and for
+ * the same reason: below it, "link" is read as a case id.
+ *
+ * Only a case entered into the public record has a slug at all, so this route
+ * cannot reach a private one - which is what makes "only public cases get a
+ * link" a property of the data rather than a rule the client is trusted with.
+ */
+casesRouter.get("/link/:slug", async (req, res) => {
+    // Set before the guards so every arm carries it: a case published a moment
+    // from now must not be answered "not found" out of a cache, and a malformed
+    // slug's 404 is otherwise heuristically cacheable by any shared proxy. The
+    // hit overwrites it below.
+    res.setHeader("Cache-Control", "no-store");
+
+    const slug = req.params.slug;
+    if (typeof slug !== "string" || slug.length > MAX_SLUG_LENGTH || !SLUG_PATTERN.test(slug)) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    const result = await findPublicCaseBySlug(slug);
+    if (!result) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    // Gated on the status, not on the lookup: findPublicCaseBySlug matches only
+    // READY rows, but findCaseStatus answers FAILED for a READY row whose
+    // rootNodeId is missing from its own nodes, and caching THAT immutable for
+    // a year would make one corrupt bible permanent in every browser that
+    // opened the link. Same rule GET /:id follows.
+    if (result.status === "READY") {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    }
+    res.json(result);
+});
+
+/**
+ * The operator's takedown, and the only writer of isPublic outside the upload.
+ *
+ * Publication is deliberately one-way for callers - nothing lets a visitor
+ * change someone else's case - which leaves no way at all to answer an abuse
+ * report about a photo on the docket short of SQL against production. This is
+ * that way, and it is off unless ADMIN_TOKEN is set.
+ *
+ * Every rejection is the same 404 the unknown-slug arm returns: a 401 would
+ * confirm the endpoint exists and is armed, and a 403 would confirm the slug.
+ */
+casesRouter.delete("/link/:slug", perIpDocketLimiter, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    const slug = req.params.slug;
+    if (
+        !isOperator(req) ||
+        typeof slug !== "string" ||
+        slug.length > MAX_SLUG_LENGTH ||
+        !SLUG_PATTERN.test(slug)
+    ) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+
+    if (!(await unpublishCase(slug))) {
+        res.status(404).json({ error: "Case not found." });
+        return;
+    }
+    res.status(204).end();
+});
+
+/**
+ * Whether the caller holds the operator token.
+ *
+ * Compared with timingSafeEqual rather than ===, which returns on the first
+ * differing byte and leaks the prefix to anyone willing to measure. Length is
+ * checked first because timingSafeEqual throws on a length mismatch - that
+ * comparison is not constant time, but the length of a secret is not the secret.
+ *
+ * Absent ADMIN_TOKEN means the route is off, not that every caller is an
+ * operator: an unset env var must never open a door.
+ */
+function isOperator(req: Request): boolean {
+    const expected = process.env.ADMIN_TOKEN;
+    if (!expected) {
+        return false;
+    }
+    const offered = req.get("x-admin-token");
+    if (typeof offered !== "string") {
+        return false;
+    }
+    const a = Buffer.from(offered);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+}
 
 casesRouter.get("/:id", async (req, res) => {
     const id = req.params.id;

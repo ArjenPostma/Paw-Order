@@ -1,13 +1,21 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type {
     PublicCase,
+    PublicCaseSummary,
     PublicEvidence,
     PublicTrialNode,
     Truth,
     Verdict,
 } from "@paw-order/shared";
-import { ApiError, createCase, fetchCase, playTurn } from "@/api";
+import {
+    ApiError,
+    createCase,
+    fetchCase,
+    fetchCaseBySlug,
+    fetchPublicCases,
+    playTurn,
+} from "@/api";
 import { forgetCase, playedCases, rememberCase } from "@/history";
 import ArrestScreen from "@/screens/ArrestScreen.vue";
 import CourtroomScreen from "@/screens/CourtroomScreen.vue";
@@ -48,7 +56,7 @@ const stalled = ref<string | null>(null);
  * rejected upload - the commonest failure, and the one most worth retrying -
  * costs the player their typed name and another trip through the file picker.
  */
-const retry = ref<{ file: File; name: string } | null>(null);
+const retry = ref<{ file: File; name: string; isPublic: boolean } | null>(null);
 
 /**
  * The run. `path` is the whole list of choice indexes taken so far: the api
@@ -68,7 +76,7 @@ const turning = ref(false);
 // The arrest screen is a beat, not a state the api knows about: a ready case
 // waits here until the player enters court.
 const entered = ref(false);
-// The "cases on file" strip, held here rather than read by the upload screen, so
+// The "Your cases" strip, held here rather than read by the upload screen, so
 // that dropping a dead case updates the list without remounting the screen and
 // wiping whatever the player had typed into the defendant name field.
 const previous = ref(playedCases());
@@ -76,15 +84,174 @@ const previous = ref(playedCases());
 // own status line; a replay is usually fast, but on a cold cache it is a network
 // round trip with nothing else on screen to say so.
 const opening = ref<string | null>(null);
+/**
+ * The public docket, held here for the same reason `previous` is: a case that
+ * turns out to be gone has to leave whichever strip it is in, and remounting
+ * the upload screen to re-read a list would wipe the typed defendant name.
+ */
+const others = ref<PublicCaseSummary[]>([]);
+/**
+ * Their own cases have a strip of their own directly above, so a case that is
+ * in both lists is shown once, in theirs. Playing a public case remembers it,
+ * which is exactly when the two lists overlap.
+ */
+const otherCases = computed(() => {
+    const mine = new Set(previous.value.map((played) => played.id));
+    return others.value.filter((entry) => !mine.has(entry.id));
+});
 
-/** The one place a READY case becomes the case being played. */
-function openCase(ready: PublicCase): void {
+/**
+ * The address bar is the app's only route: /case/<slug> for a case that can be
+ * shared, / for everything else. No router - one path, matched here.
+ *
+ * Bounded and lowercase to match what the api will accept, so a hand-typed path
+ * is turned away before it costs a request.
+ */
+const CASE_PATH = /^\/case\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/;
+/** The api's own cap, so an overlong path is turned away before it costs a request. */
+const MAX_SLUG_LENGTH = 64;
+
+function slugFromLocation(): string | null {
+    const slug = CASE_PATH.exec(window.location.pathname)?.[1];
+    return slug !== undefined && slug.length <= MAX_SLUG_LENGTH ? slug : null;
+}
+
+/**
+ * Puts the case in the address bar, so the link can be copied from there as
+ * well as from the button.
+ *
+ * The equality check does two jobs: it keeps a reload or a repeated open from
+ * stacking identical history entries, and it makes this safe to call from the
+ * popstate handler's path, where the location is already what it should be and
+ * pushing would fight the back button.
+ */
+function showUrl(slug: string | null, replace = false): void {
+    const path = slug === null ? "/" : `/case/${slug}`;
+    if (window.location.pathname === path) {
+        return;
+    }
+    // replace, for a url that led nowhere: pushing "/" on top of a dead link
+    // leaves the dead link one Back press away, where it fetches, fails and
+    // pushes "/" again - a fixed point the Back button cannot get out of.
+    if (replace) {
+        window.history.replaceState({}, "", path);
+        return;
+    }
+    window.history.pushState({}, "", path);
+}
+
+/** Back and forward move between a case and the home screen, the whole history here. */
+function onPopState(): void {
+    void openFromLocation();
+}
+
+onMounted(() => {
+    window.addEventListener("popstate", onPopState);
+    void loadDocket();
+    void openFromLocation();
+});
+
+// The root component never unmounts in the built app, so this is for the dev
+// server: without it every hot update leaves another listener behind, each
+// answering one Back press against a detached instance.
+onBeforeUnmount(() => {
+    window.removeEventListener("popstate", onPopState);
+});
+
+/**
+ * Opens whatever the address bar names. Runs on load - this is how a shared
+ * link works at all - and on every back or forward.
+ *
+ * Not remembered in "Your cases": a case reached by someone else's link is not
+ * one this browser made.
+ */
+async function openFromLocation(): Promise<void> {
+    const slug = slugFromLocation();
+    if (currentCase.value?.slug === slug && slug !== null) {
+        return;
+    }
+
+    // Bumped before the home branch too, not only before a fetch: a link fetch
+    // still in flight when the player presses Back would otherwise land after
+    // the navigation, open its case and push the url straight back on.
+    run += 1;
+    const thisRun = run;
+
+    if (slug === null) {
+        // Navigated back out of a case. The url says home, so the app follows.
+        if (currentCase.value) {
+            takeAnotherCase();
+        }
+        return;
+    }
+    error.value = null;
+
+    try {
+        const result = await fetchCaseBySlug(slug);
+        if (thisRun !== run) {
+            return;
+        }
+        if (result.status !== "READY") {
+            dropLink();
+            return;
+        }
+        openCase(result);
+    } catch (cause) {
+        if (thisRun !== run) {
+            return;
+        }
+        // A 404 is the case being gone, unpublished, or the link being wrong -
+        // one message covers all three, because from here they are one thing.
+        if (cause instanceof ApiError && cause.status === 404) {
+            dropLink();
+            return;
+        }
+        error.value = cause instanceof ApiError ? cause.message : "That case would not open.";
+    }
+}
+
+/** A link that leads nowhere: back to the envelope, and out of the address bar. */
+function dropLink(): void {
+    showUrl(null, true);
+    error.value = "That case is no longer on file.";
+}
+
+/**
+ * Fetched once, on load. A failure is silent: the docket is a strip of other
+ * people's cases at the bottom of the home page, and a player who came here to
+ * upload a photo is owed nothing about it.
+ */
+async function loadDocket(): Promise<void> {
+    try {
+        others.value = await fetchPublicCases();
+    } catch {
+        // Nothing to do and nothing to tell the player.
+    }
+}
+
+/**
+ * The one place a READY case becomes the case being played.
+ *
+ * `mine` is true only for a case this browser just generated. "Your cases" is
+ * the list of dogs the player brought to court, not the list of cases they have
+ * opened: one reached from the public docket belongs to whoever uploaded that
+ * dog, and filing it under theirs claims someone else's. A replay is not
+ * remembered either - a case can only be replayed from a strip it is already in.
+ */
+function openCase(ready: PublicCase, mine = false): void {
     currentCase.value = ready;
     entered.value = false;
     preparing.value = false;
     // The attempt landed, so there is nothing left to retry - and holding the
     // File would pin the whole photo in memory for the length of the trial.
     retry.value = null;
+    // A shareable case puts its link in the address bar and keeps it there for
+    // the whole trial, so it can be copied from there rather than only from the
+    // button. A private one has no link to show.
+    showUrl(ready.slug);
+    if (!mine) {
+        return;
+    }
     rememberCase({
         id: ready.id,
         name: ready.defendant.name,
@@ -144,6 +311,9 @@ async function onReplay(id: string): Promise<void> {
 function dropCase(id: string): void {
     forgetCase(id);
     previous.value = playedCases();
+    // Both strips: a public case can be gone too, and the docket is only
+    // fetched on load, so without this the dead tile sits there until reload.
+    others.value = others.value.filter((entry) => entry.id !== id);
     error.value = "That case is no longer on file.";
 }
 
@@ -180,6 +350,7 @@ function enterCourt(): void {
 
 /** Back to the envelope. The api holds no run state, so nothing to tear down. */
 function takeAnotherCase(): void {
+    showUrl(null);
     run += 1;
     currentCase.value = null;
     entered.value = false;
@@ -239,18 +410,18 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function onPhoto(file: File, name: string): Promise<void> {
+async function onPhoto(file: File, name: string, isPublic: boolean): Promise<void> {
     run += 1;
     const thisRun = run;
     preparing.value = true;
     error.value = null;
     stalled.value = null;
-    retry.value = { file, name };
+    retry.value = { file, name, isPublic };
     currentCase.value = null;
     entered.value = false;
 
     try {
-        const accepted = await createCase(file, name);
+        const accepted = await createCase(file, name, isPublic);
         let consecutiveFailures = 0;
 
         for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
@@ -274,7 +445,8 @@ async function onPhoto(file: File, name: string): Promise<void> {
             consecutiveFailures = 0;
 
             if (result.status === "READY") {
-                openCase(result);
+                // The one call that owns the case: this browser paid for it.
+                openCase(result, true);
                 return;
             }
             if (result.status === "FAILED") {
@@ -298,6 +470,7 @@ async function onPhoto(file: File, name: string): Promise<void> {
         v-if="screen === 'upload'"
         :error="error"
         :previous="previous"
+        :others="otherCases"
         :opening="opening"
         :retry="retry"
         @photo="onPhoto"
@@ -339,6 +512,7 @@ async function onPhoto(file: File, name: string): Promise<void> {
         :truth="outcome.truth"
         :exhibits="exhibits"
         :defendant-name="currentCase.defendant.name"
+        :slug="currentCase.slug"
         @again="enterCourt"
         @new-case="takeAnotherCase"
     />

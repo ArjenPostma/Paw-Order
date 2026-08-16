@@ -190,6 +190,14 @@ export type PublicTrialNode = Omit<TrialNode, "choices"> & { choices: PublicChoi
 export type PublicCase = Pick<CaseBible, "defendant" | "crime"> & {
     id: string;
     truth?: never;
+    /**
+     * The shareable half of this case's url, or null when there is none.
+     *
+     * A column on the row, not a bible field - the generator never sees it.
+     * Only a case entered into the public record gets one, so null is also the
+     * client's answer to "may this be shared": no slug, no link, no button.
+     */
+    slug: string | null;
     /** Narrowed, not inherited: see PublicWitness and PublicEvidence. */
     witnesses: PublicWitness[];
     /**
@@ -201,6 +209,30 @@ export type PublicCase = Pick<CaseBible, "defendant" | "crime"> & {
     evidence: PublicEvidence[];
     rootNode: PublicTrialNode;
 };
+
+/**
+ * One tile on the public docket: a case whose player chose to enter it into the
+ * public record, as the home page lists it.
+ *
+ * Deliberately not derived from CaseBible. It is the fields the tile actually
+ * draws and nothing else - written out by hand so a field added to the bible
+ * cannot arrive here, which is the whole point of a list served to people who
+ * did not generate these cases. The client's own localStorage strip holds a
+ * superset, so one tile renders both.
+ *
+ * `truth?: never` for the reason PublicCase and CaseAccepted carry it, and it
+ * matters most here: this is the payload strangers receive. Without it a later
+ * `{ ...entity.bible, id, name, charge, photoUrl }` in listPublicCases would
+ * typecheck - object spread suppresses excess-property checking - and ship the
+ * answer for twelve cases at once.
+ */
+export interface PublicCaseSummary {
+    id: string;
+    name: string;
+    charge: string;
+    photoUrl: string;
+    truth?: never;
+}
 
 export const CASE_STATUSES = ["PENDING", "READY", "FAILED"] as const;
 

@@ -765,6 +765,320 @@ describe("generation slot accounting", () => {
     });
 });
 
+/**
+ * The one list the api serves to people who did not generate what is on it, so
+ * everything here is about what may be on it: only cases whose player asked for
+ * it, only cases that can actually be opened, and only the five fields the tile
+ * draws.
+ */
+describe("the public docket", () => {
+    async function readyCase(name: string, field: string | null): Promise<string> {
+        const upload = request(app).post("/api/cases").field("name", name);
+        // Two fields plus the file is three parts. The multer limits are exact,
+        // so this is also the anchor for them: at fields:1 the checkbox turns
+        // every named upload into "A photo is required."
+        if (field !== null) {
+            void upload.field("public", field);
+        }
+        const created = await upload.attach("photo", freshPhoto(), {
+            filename: "dog.png",
+            contentType: "image/png",
+        });
+        expect(created.status).toBe(202);
+        await pollUntilReady(created.body.id);
+        const id: string = created.body.id;
+        return id;
+    }
+
+    async function docketIds(): Promise<string[]> {
+        const docket = await request(app).get("/api/cases/public");
+        expect(docket.status).toBe(200);
+        return docket.body.map((entry: { id: string }) => entry.id);
+    }
+
+    it("lists a case entered into the public record and no other", async () => {
+        const open = await readyCase("Biscuit", "true");
+        const closed = await readyCase("Rex", "false");
+        // The commonest case by far, and the one that must never appear: the
+        // player never touched the checkbox at all.
+        const untouched = await readyCase("Nala", null);
+
+        const ids = await docketIds();
+        expect(ids).toContain(open);
+        expect(ids).not.toContain(closed);
+        expect(ids).not.toContain(untouched);
+    });
+
+    // A PENDING row holds the placeholder bible - "Unnamed", "Pending
+    // investigation" - and a FAILED one holds whatever it died with. Neither is
+    // a case a stranger can open, so neither belongs on a list of cases to open.
+    it("withholds a public case that is not READY", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const id = await readyCase("Biscuit", "true");
+        expect(await docketIds()).toContain(id);
+
+        await repository.update(id, { status: "PENDING" });
+        expect(await docketIds()).not.toContain(id);
+
+        await repository.update(id, { status: "FAILED" });
+        expect(await docketIds()).not.toContain(id);
+    });
+
+    // The route sits above GET /:id, and it has to: below it, "public" is read
+    // as a case id and the uuid guard answers 404.
+    it("answers the docket route rather than reading it as a case id", async () => {
+        const docket = await request(app).get("/api/cases/public");
+
+        expect(docket.status).toBe(200);
+        expect(Array.isArray(docket.body)).toBe(true);
+        expect(docket.headers["cache-control"]).toBe("public, max-age=60");
+    });
+
+    // Nothing here is the player's own: the tile is what a stranger is handed
+    // about someone else's dog, and the trial they are about to play must still
+    // be a trial when they open it.
+    it("puts nothing on the docket beyond the tile", async () => {
+        const id = await readyCase("Biscuit", "true");
+
+        const docket = await request(app).get("/api/cases/public");
+        const entry = docket.body.find((candidate: { id: string }) => candidate.id === id);
+        expect(entry).toBeDefined();
+        expect(Object.keys(entry).sort()).toEqual(["charge", "id", "name", "photoUrl"]);
+        expect(entry.name).toBe("Biscuit");
+        expect(entry.charge).toBeTruthy();
+
+        const wire = JSON.stringify(docket.body);
+        expect(wire).not.toContain("misleadingEvidenceIds");
+        expect(wire).not.toContain("effects");
+        expect(wire).not.toContain("visualFacts");
+    });
+
+    // Newest first. Backdated rather than raced: two cases created a
+    // millisecond apart would make the assertion a coin toss on a fast machine.
+    it("lists the newest case first", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const older = await readyCase("Biscuit", "true");
+        const newer = await readyCase("Rex", "true");
+        await repository.update(older, { createdAt: new Date(Date.now() - 60_000) });
+
+        const ids = await docketIds();
+        expect(ids.indexOf(newer)).toBeLessThan(ids.indexOf(older));
+    });
+
+    // Last in this block on purpose: it fills the docket, so anything asserting
+    // on a specific case afterwards would find it pushed off the end.
+    it("serves at most a dockets worth, however many are public", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const seed = await repository.findOneByOrFail({ status: "READY" });
+        // Inserted directly: thirteen uploads is thirteen generations to prove
+        // one LIMIT, and the route reads the column, not the upload path.
+        for (let extra = 0; extra < 13; extra += 1) {
+            await repository.save(
+                repository.create({
+                    status: "READY",
+                    bible: seed.bible,
+                    photoHash: null,
+                    isPublic: true,
+                    slug: `docket-cap-${String(extra)}`,
+                }),
+            );
+        }
+
+        expect((await docketIds()).length).toBe(12);
+    });
+});
+
+/**
+ * The shared link. A slug exists only for a case its player entered into the
+ * public record, which is the whole access rule: the route cannot reach a
+ * private case because a private case has nothing to match.
+ */
+describe("shared case links", () => {
+    async function readyCase(name: string, isPublic: boolean): Promise<string> {
+        const created = await request(app)
+            .post("/api/cases")
+            .field("name", name)
+            .field("public", isPublic ? "true" : "false")
+            .attach("photo", freshPhoto(), { filename: "dog.png", contentType: "image/png" });
+        expect(created.status).toBe(202);
+        await pollUntilReady(created.body.id);
+        const id: string = created.body.id;
+        return id;
+    }
+
+    // The case title, not the dog's name: the link is about the case, and a
+    // player's own name for their dog does not belong in a url other people
+    // paste around. The fixture's title is "The Great Birthday Cake Heist".
+    it("gives a public case a slug built from its case title", async () => {
+        const id = await readyCase("Biscuit", true);
+
+        const ready = await request(app).get(`/api/cases/${id}`);
+        expect(ready.body.slug).toMatch(/^the-great-birthday-cake-heist-[0-9a-f]{6}$/);
+    });
+
+    // Null, not absent: the client reads this as "may this be shared", and an
+    // undefined would read the same as a case generated before slugs existed.
+    it("gives a private case no slug at all", async () => {
+        const id = await readyCase("Biscuit", false);
+
+        const ready = await request(app).get(`/api/cases/${id}`);
+        expect(ready.body.slug).toBeNull();
+    });
+
+    it("serves the case behind a shared link, identically to its id", async () => {
+        const id = await readyCase("Biscuit", true);
+        const byId = await request(app).get(`/api/cases/${id}`);
+
+        const byLink = await request(app).get(`/api/cases/link/${byId.body.slug}`);
+
+        expect(byLink.status).toBe(200);
+        expect(byLink.body).toEqual(byId.body);
+        expect(byLink.body.truth).toBeUndefined();
+        // The same header the id route serves for a finished case. Bodies being
+        // equal says nothing about headers, and this one is the difference
+        // between a shared link that costs one request and one that costs every
+        // reader a round trip.
+        expect(byLink.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+    });
+
+    // The rule the whole design rests on. A slug is the only handle a link has,
+    // and a private case has none - so there is nothing to leak even if the
+    // client is rewritten by hand.
+    it("cannot reach a case that is not public, even with its slug in the row", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const id = await readyCase("Biscuit", true);
+        const ready = await request(app).get(`/api/cases/${id}`);
+        const slug: string = ready.body.slug;
+
+        // Whatever a private case's slug would be, the route refuses it. Set
+        // directly, because the api has no way to un-publish a case.
+        await repository.update(id, { isPublic: false });
+
+        const byLink = await request(app).get(`/api/cases/link/${slug}`);
+        expect(byLink.status).toBe(404);
+        // The id still works: the case is the player's own, and their strip
+        // replays it. Only the link is gone.
+        expect((await request(app).get(`/api/cases/${id}`)).status).toBe(200);
+    });
+
+    it("404s a slug nobody holds, and one that is not a slug", async () => {
+        for (const slug of [
+            "biscuit-000000",
+            "not a slug",
+            "../health",
+            "%2e%2e",
+            "A".repeat(80),
+        ]) {
+            const response = await request(app).get(`/api/cases/link/${encodeURIComponent(slug)}`);
+            expect(response.status).toBe(404);
+            // Every miss, the malformed ones included. A case published a
+            // moment from now must not be answered "not found" out of a cache,
+            // and an uncontrolled 404 is heuristically cacheable by any shared
+            // proxy on the path.
+            expect(response.headers["cache-control"]).toBe("no-store");
+        }
+    });
+
+    // Publication is one-way for callers, so this route is the only answer to
+    // an abuse report short of SQL against production. Everything it refuses is
+    // refused as a plain 404: a 401 would confirm the route is armed and a 403
+    // would confirm the slug.
+    describe("operator takedown", () => {
+        const TOKEN = "test-admin-token";
+
+        async function withToken<T>(body: () => Promise<T>): Promise<T> {
+            const previous = process.env.ADMIN_TOKEN;
+            process.env.ADMIN_TOKEN = TOKEN;
+            try {
+                return await body();
+            } finally {
+                if (previous === undefined) {
+                    delete process.env.ADMIN_TOKEN;
+                } else {
+                    process.env.ADMIN_TOKEN = previous;
+                }
+            }
+        }
+
+        it("takes a case off the docket and kills its link, leaving the case playable", async () => {
+            const id = await readyCase("Biscuit", true);
+            const ready = await request(app).get(`/api/cases/${id}`);
+            const slug: string = ready.body.slug;
+
+            const removed = await withToken(() =>
+                request(app).delete(`/api/cases/link/${slug}`).set("x-admin-token", TOKEN),
+            );
+
+            expect(removed.status).toBe(204);
+            expect((await request(app).get(`/api/cases/link/${slug}`)).status).toBe(404);
+            const docket = await request(app).get("/api/cases/public");
+            expect(docket.body.map((entry: { id: string }) => entry.id)).not.toContain(id);
+            // The player who made it keeps it: their strip replays by id.
+            const stillPlayable = await request(app).get(`/api/cases/${id}`);
+            expect(stillPlayable.status).toBe(200);
+            expect(stillPlayable.body.status).toBe("READY");
+            expect(stillPlayable.body.slug).toBeNull();
+        });
+
+        it("refuses a wrong token, and refuses every caller when none is configured", async () => {
+            const id = await readyCase("Biscuit", true);
+            const slug: string = (await request(app).get(`/api/cases/${id}`)).body.slug;
+
+            const wrong = await withToken(() =>
+                request(app).delete(`/api/cases/link/${slug}`).set("x-admin-token", "not-it"),
+            );
+            expect(wrong.status).toBe(404);
+
+            const none = await withToken(() => request(app).delete(`/api/cases/link/${slug}`));
+            expect(none.status).toBe(404);
+
+            // An unset ADMIN_TOKEN means the route is off, never that every
+            // caller is an operator. Asserted with no header AND with one,
+            // because "" == undefined logic would open the door to the latter.
+            const previous = process.env.ADMIN_TOKEN;
+            delete process.env.ADMIN_TOKEN;
+            try {
+                expect((await request(app).delete(`/api/cases/link/${slug}`)).status).toBe(404);
+                const guessed = await request(app)
+                    .delete(`/api/cases/link/${slug}`)
+                    .set("x-admin-token", "");
+                expect(guessed.status).toBe(404);
+            } finally {
+                if (previous !== undefined) {
+                    process.env.ADMIN_TOKEN = previous;
+                }
+            }
+
+            // Still on the docket and still linkable: nothing above worked.
+            expect((await request(app).get(`/api/cases/link/${slug}`)).status).toBe(200);
+        });
+
+        it("404s a takedown for a case that was never public", async () => {
+            const id = await readyCase("Rex", false);
+            expect((await request(app).get(`/api/cases/${id}`)).body.slug).toBeNull();
+
+            const missing = await withToken(() =>
+                request(app)
+                    .delete("/api/cases/link/no-such-case-000000")
+                    .set("x-admin-token", TOKEN),
+            );
+            expect(missing.status).toBe(404);
+        });
+    });
+
+    // A link to a case whose generation fell apart would open an empty
+    // courtroom, so the lookup gates on READY as well as on public.
+    it("404s a link to a case that is not READY", async () => {
+        const repository = AppDataSource.getRepository(CaseEntity);
+        const id = await readyCase("Biscuit", true);
+        const ready = await request(app).get(`/api/cases/${id}`);
+
+        await repository.update(id, { status: "FAILED" });
+
+        expect((await request(app).get(`/api/cases/link/${ready.body.slug}`)).status).toBe(404);
+    });
+});
+
 describe("upload guards", () => {
     it("rejects a photo over the size cap with 400, not 500", async () => {
         const oversize = Buffer.alloc(9 * 1024 * 1024, 1);

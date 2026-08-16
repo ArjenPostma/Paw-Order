@@ -34,6 +34,43 @@ describe("validateFacts", () => {
         expect(validateFacts("[]").ok).toBe(false);
     });
 
+    // The courtroom renders one statement card per witness, keyed by this id.
+    // Two witnesses sharing one gives Vue duplicate keys, and it can then patch
+    // the wrong card when the rail re-renders.
+    it("rejects two witnesses sharing an id", () => {
+        const result = validateFacts(
+            brokenFacts((facts) => {
+                const [first, second] = facts.witnesses;
+                expect(first).toBeDefined();
+                expect(second).toBeDefined();
+                if (first && second) {
+                    second.id = first.id;
+                }
+            }),
+        );
+
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result)).toContain("facts.witnesses contains duplicate ids");
+    });
+
+    // Model prose is rendered on other people's screens now - a charge on a
+    // public docket tile, a timeline entry the client splits on its first dash.
+    // A bidi override reverses the text around it; a newline defeats the split.
+    it("strips control and direction characters out of stored strings", () => {
+        const result = validateFacts(
+            brokenFacts((facts) => {
+                facts.crime.charge = "Theft of\u000Bcake \u202Ereversed\u202C";
+                facts.crime.timeline[0] = "14:00 - Cake placed\non the counter";
+            }),
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect(result.value.crime.charge).toBe("Theft of cake reversed");
+            expect(result.value.crime.timeline[0]).toBe("14:00 - Cake placed on the counter");
+        }
+    });
+
     it("rejects an exhibit with no visual facts", () => {
         const result = validateFacts(
             brokenFacts((facts) => {
