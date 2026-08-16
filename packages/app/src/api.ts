@@ -79,13 +79,29 @@ async function readJson(response: Response): Promise<unknown> {
     return response.json();
 }
 
-/** Returns as soon as the case has an id. The case itself is still generating. */
+/**
+ * Returns as soon as the case has an id. The case itself is still generating.
+ *
+ * `honeypot` is whatever was in the upload screen's hidden field: empty for a
+ * person, since they never see it. The api refuses an upload that carries it.
+ */
 export async function createCase(
     photo: File,
     name: string,
     isPublic: boolean,
+    honeypot: string,
 ): Promise<CaseAccepted> {
     const body = new FormData();
+    // Sent only when filled, so an ordinary upload still carries three text
+    // fields at most - the api's multer limits count these exactly.
+    if (honeypot) {
+        body.append("website", honeypot);
+    }
+    // Milliseconds this page has been open. performance.now() is monotonic and
+    // starts at navigation, so a wrong system clock cannot make it absurd and
+    // nothing here depends on agreeing with the server's clock. The api refuses
+    // an upload that arrives faster than a person could have picked a photo.
+    body.append("dwell", String(Math.round(performance.now())));
     // Before the photo, which is the order multer's own docs ask for: a field
     // that arrives after the file is not guaranteed to be on req.body while the
     // file is being handled. Omitted entirely when blank - the api defaults it.

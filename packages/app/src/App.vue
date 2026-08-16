@@ -410,7 +410,14 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function onPhoto(file: File, name: string, isPublic: boolean): Promise<void> {
+// honeypot is the upload screen's hidden field, passed through rather than
+// stored: `retry` replays a real player's attempt, and a real player's is empty.
+async function onPhoto(
+    file: File,
+    name: string,
+    isPublic: boolean,
+    honeypot: string,
+): Promise<void> {
     run += 1;
     const thisRun = run;
     preparing.value = true;
@@ -421,7 +428,7 @@ async function onPhoto(file: File, name: string, isPublic: boolean): Promise<voi
     entered.value = false;
 
     try {
-        const accepted = await createCase(file, name, isPublic);
+        const accepted = await createCase(file, name, isPublic, honeypot);
         let consecutiveFailures = 0;
 
         for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {

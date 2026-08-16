@@ -11,11 +11,26 @@ interface Bucket {
     startedAt: number;
 }
 
+/**
+ * A ceiling, either fixed or read per request.
+ *
+ * The env-backed ceilings pass a thunk. Read once at module load they were
+ * pinned for the life of the process: a test could not lower one to observe
+ * which middleware charged first without vi.resetModules, which rebuilds
+ * AppDataSource. Reading per request also makes them tunable without a
+ * redeploy.
+ */
+export type Ceiling = number | (() => number);
+
+function resolveCeiling(value: Ceiling): number {
+    return typeof value === "function" ? value() : value;
+}
+
 export interface RateLimitOptions {
     /** Per-ip window length. */
     windowMs: number;
     /** Requests allowed per ip per window. */
-    max: number;
+    max: Ceiling;
     /**
      * 429 body. The default says "shortly", which is only true of a window
      * measured in minutes - a day-long window needs its own wording.
@@ -115,7 +130,7 @@ export function rateLimit({
         if (!bucket || now - bucket.startedAt >= windowMs) {
             charged = { count: 1, startedAt: now };
             buckets.set(key, charged);
-        } else if (bucket.count >= max) {
+        } else if (bucket.count >= resolveCeiling(max)) {
             res.setHeader("Retry-After", Math.ceil((bucket.startedAt + windowMs - now) / 1000));
             res.status(429).json({ error: message });
             return;
@@ -134,7 +149,7 @@ export function rateLimit({
 export interface DailyBudgetOptions {
     /** Process-wide ceiling per 24h, independent of ip - the backstop when the
      *  caller can rotate addresses. */
-    dailyMax: number;
+    dailyMax: Ceiling;
     /** 429 body, when the default is not what this ceiling means. */
     message?: string;
     /** See RateLimitOptions.refundOnRejection. */
@@ -161,7 +176,7 @@ export function dailyBudget({
         if (now - daily.startedAt >= DAY_MS) {
             daily = { count: 0, startedAt: now };
         }
-        if (daily.count >= dailyMax) {
+        if (daily.count >= resolveCeiling(dailyMax)) {
             res.status(429).json({ error: message });
             return;
         }

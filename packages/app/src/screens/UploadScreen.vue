@@ -19,7 +19,7 @@ const props = defineProps<{
     retry: { file: File; name: string; isPublic: boolean } | null;
 }>();
 const emit = defineEmits<{
-    photo: [file: File, name: string, isPublic: boolean];
+    photo: [file: File, name: string, isPublic: boolean, honeypot: string];
     replay: [id: string];
 }>();
 
@@ -52,6 +52,14 @@ const strips = computed(() =>
 // generation per minute, so the round trip is worth not making.
 const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The honeypot. Off-screen rather than display:none or type="hidden", because a
+ * form filler skips both of those and fills this one; hidden from assistive tech
+ * so nobody is ever offered a field the api will refuse them for. Whatever ends
+ * up here goes to the api as-is - the check that matters is the api's.
+ */
+const website = ref("");
 
 // Drag state is local: nothing above this screen cares that a file is hovering.
 const dragging = ref(false);
@@ -125,7 +133,7 @@ async function book(): Promise<void> {
     booking.value = true;
     // Resized here rather than at pick time: the checks in take() are against
     // the api's own limits, and what the api sees is only ever smaller.
-    emit("photo", await downscale(held.file), name.value.trim(), publicRecord.value);
+    emit("photo", await downscale(held.file), name.value.trim(), publicRecord.value, website.value);
 }
 
 function onFileChange(event: Event): void {
@@ -185,6 +193,14 @@ function onDrop(event: DragEvent): void {
                 :maxlength="MAX_NAME_LENGTH"
                 autocomplete="off"
             />
+        </label>
+
+        <!-- The honeypot, kept next to the field it imitates so a filler that
+             reads the form in order meets it. aria-hidden and tabindex=-1 keep
+             it away from anyone reading or tabbing the page. -->
+        <label class="trap" aria-hidden="true">
+            <span>Website</span>
+            <input v-model="website" type="text" tabindex="-1" autocomplete="off" />
         </label>
 
         <!-- The label IS the drop zone: one target for click, keyboard and
@@ -379,6 +395,18 @@ function onDrop(event: DragEvent): void {
 .named__input:focus-visible {
     outline: 3px solid var(--stamp);
     outline-offset: 2px;
+}
+
+/* Taken out of the page rather than hidden: display:none and visibility:hidden
+   are both skipped by the form fillers this exists to catch. Sized to nothing
+   and clipped so it cannot be scrolled to or land under a stray click. */
+.trap {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 
 .envelope {

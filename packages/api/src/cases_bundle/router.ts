@@ -41,6 +41,13 @@ const NOT_A_DOG = "This court only tries dogs. Try a photo of one.";
 const NOT_PUBLISHABLE =
     "This photo cannot be entered into the public record. Untick the box to try this case privately.";
 const OBSCENE_NAME = "The court will not read that name aloud. Try the one the dog answers to.";
+const NOT_HUMAN = "The bailiff wants to see some ID. Reload the page and try again.";
+/**
+ * How long the page must have been open before an upload is believable. A person
+ * has to read the screen and pick a file; two seconds is under the fastest that
+ * can happen and well over any real render delay.
+ */
+const MIN_DWELL_MS = 2_000;
 const URL_NAME = "That is a web address, not a name.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // C0, DEL and C1, plus the invisible formatting characters. The formatting ones
@@ -72,8 +79,9 @@ const upload = multer({
     // Both counts are exact, so they are load-bearing in the other direction
     // too: leaving fields at 1 when the checkbox was added would have made every
     // upload that carried a name AND a checkbox a MulterError, answered "A photo
-    // is required" for a request that had one.
-    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 4, fields: 2 },
+    // is required" for a request that had one. fields:4 is the name, the
+    // checkbox, and the two requireHuman carries - the honeypot and the dwell.
+    limits: { fileSize: MAX_PHOTO_BYTES, files: 1, parts: 6, fields: 4 },
     fileFilter: (_req, file, callback) => {
         // Client-declared mime type is a hint, not proof - it caps the obvious
         // junk; the size limit is what actually bounds the request.
@@ -98,7 +106,10 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
 
 // Generation is anonymous and writes to paid storage, so it is capped per ip and
 // per day. Every ceiling is env-tunable so a load test (or the suite) can raise
-// it without editing code.
+// it without editing code, and every one is passed as a thunk so the env value
+// is read per request rather than pinned at module load - which is what lets a
+// test lower one mid-suite to check which middleware charged first, and what
+// makes a ceiling changeable without a redeploy.
 
 /**
  * The outer per-ip bound, and the only one mounted before the body is read. It
@@ -112,7 +123,7 @@ const uploadPhoto: RequestHandler = (req, res, next) => {
  */
 const perIpUploadLimiter = rateLimit({
     windowMs: 60_000,
-    max: positiveIntEnv("UPLOAD_MAX_PER_MINUTE", 10),
+    max: () => positiveIntEnv("UPLOAD_MAX_PER_MINUTE", 10),
 });
 /**
  * The real per-ip ceiling on generation, mounted past every check that can turn
@@ -126,7 +137,7 @@ const perIpUploadLimiter = rateLimit({
  */
 const perIpGenerationLimiter = rateLimit({
     windowMs: 60_000,
-    max: positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
+    max: () => positiveIntEnv("GENERATION_MAX_PER_MINUTE", 1),
     refundOnRejection: true,
 });
 /**
@@ -145,7 +156,7 @@ const perIpGenerationLimiter = rateLimit({
  */
 const perIpDailyLimiter = rateLimit({
     windowMs: DAY_MS,
-    max: positiveIntEnv("GENERATION_MAX_PER_IP_PER_DAY", 2),
+    max: () => positiveIntEnv("GENERATION_MAX_PER_IP_PER_DAY", 2),
     // The default 429 body says "shortly", which is a lie about a 24h window.
     message: "That is both of today's cases. A new one can be opened tomorrow.",
     // Buckets only leave the map when their window expires, so over a day this
@@ -169,12 +180,12 @@ const perIpDailyLimiter = rateLimit({
  * cheap outcome and should not be the scarce one.
  */
 const dogCheckBudget = dailyBudget({
-    dailyMax: positiveIntEnv("DOG_CHECK_MAX_PER_DAY", 200),
+    dailyMax: () => positiveIntEnv("DOG_CHECK_MAX_PER_DAY", 200),
     message: "The court has closed its doors for today. Try again tomorrow.",
     // Deliberately NOT refunded: the 400 this guards IS the spend it bounds.
 });
 const globalDailyBudget = dailyBudget({
-    dailyMax: positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
+    dailyMax: () => positiveIntEnv("GENERATION_MAX_PER_DAY", 50),
     refundOnRejection: true,
 });
 
@@ -297,6 +308,53 @@ const requireCleanName: RequestHandler = (req, res, next) => {
 const requirePhoto: RequestHandler = (req, res, next) => {
     if (!req.file) {
         res.status(400).json({ error: PHOTO_REQUIRED });
+        return;
+    }
+    next();
+};
+
+/**
+ * The two fields requireHuman reads, pulled off an untrusted body without
+ * asserting anything about them. multer parses text fields onto req.body as
+ * strings, but nothing guarantees the caller sent either one.
+ */
+function formTraps(body: unknown): { website: unknown; dwell: unknown } {
+    if (typeof body !== "object" || body === null) {
+        return { website: undefined, dwell: undefined };
+    }
+    return {
+        website: "website" in body ? body.website : undefined,
+        dwell: "dwell" in body ? body.dwell : undefined,
+    };
+}
+
+/**
+ * The cheap bot filter, and the only check on this route no real player ever
+ * meets.
+ *
+ * Two signals, both from the form. `website` is a field the upload screen hides
+ * from people and leaves for anything that fills inputs by name - a person never
+ * sees it, so anything in it is not one. `dwell` is milliseconds from page load
+ * to submit, which a person cannot get under MIN_DWELL_MS because they have to
+ * pick a file first. Absent counts as failed: a script posting straight at the
+ * route sends neither, which is exactly the caller this turns away.
+ *
+ * Mounted after requirePhoto and before every ceiling, so a bot is refused
+ * without spending a slot, a dog check or a case.
+ *
+ * ponytail: both values come from the caller, so this is a speed bump and not a
+ * bound on the bill - the ceilings above are what actually bound it. Anything
+ * driving a real browser walks straight through. Cloudflare Turnstile is the
+ * upgrade if one ever bothers.
+ */
+const requireHuman: RequestHandler = (req, res, next) => {
+    const { website, dwell } = formTraps(req.body);
+    const trapped = typeof website === "string" && website.trim() !== "";
+    // Not Number.parseInt: that reads "2000abc" as 2000, and a value that is not
+    // a number is a caller that did not fill this in from the page.
+    const openFor = typeof dwell === "string" ? Number(dwell) : Number.NaN;
+    if (trapped || !Number.isFinite(openFor) || openFor < MIN_DWELL_MS) {
+        res.status(400).json({ error: NOT_HUMAN });
         return;
     }
     next();
@@ -431,6 +489,7 @@ casesRouter.post(
     perIpUploadLimiter,
     uploadPhoto,
     requirePhoto,
+    requireHuman,
     requireCleanName,
     reuseExistingCase,
     rejectWhenBusy,
@@ -496,7 +555,7 @@ function pathFromBody(body: unknown): unknown {
  */
 const perIpTurnLimiter = rateLimit({
     windowMs: 60_000,
-    max: positiveIntEnv("TURN_MAX_PER_MINUTE", 120),
+    max: () => positiveIntEnv("TURN_MAX_PER_MINUTE", 120),
 });
 
 /** One turn of the trial. */
@@ -543,7 +602,7 @@ casesRouter.post("/:id/turn", perIpTurnLimiter, async (req, res) => {
  */
 const perIpDocketLimiter = rateLimit({
     windowMs: 60_000,
-    max: positiveIntEnv("DOCKET_MAX_PER_MINUTE", 30),
+    max: () => positiveIntEnv("DOCKET_MAX_PER_MINUTE", 30),
 });
 
 /**

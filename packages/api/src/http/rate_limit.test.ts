@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import express from "express";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
@@ -21,11 +22,21 @@ function appWith(options: RateLimitOptions) {
 /**
  * A limited route whose handler rejects, so the refund path has something to
  * observe. `status` is what the handler answers once the limiter has passed it.
+ *
+ * The app emits "settled" once the refund for a request has actually run. The
+ * refund happens on the response's finish event, and supertest resolves when the
+ * CLIENT has the response, which is not ordered against the server firing that
+ * event - so a test that fired its next request straight away could see a slot
+ * the previous request had not given back yet, and read a 429 as a missing
+ * refund. This listener is registered inside the handler, which is after the
+ * limiter registered its own, and Node fires finish listeners in registration
+ * order: by the time this one runs, the refund has.
  */
 function appRejectingWith(options: RateLimitOptions, status: number) {
     const app = express();
     app.set("trust proxy", true);
     app.get("/", rateLimit(options), (_req, res) => {
+        res.on("finish", () => app.emit("settled"));
         res.status(status).json({ error: "no" });
     });
     return app;
@@ -74,7 +85,11 @@ describe("rateLimit", () => {
         // Every one is refunded, so the single slot never runs out and the
         // limiter never gets to answer. A 429 here is the refund not happening.
         for (let attempt = 0; attempt < 5; attempt += 1) {
+            // Armed before the request, awaited after it: the refund is what the
+            // next iteration depends on, and it lands after supertest resolves.
+            const settled = once(app, "settled");
             expect((await get(app, "1.1.1.1")).status).toBe(503);
+            await settled;
         }
     });
 
