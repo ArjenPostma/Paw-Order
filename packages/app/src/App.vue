@@ -35,8 +35,16 @@ const MAX_CONSECUTIVE_POLL_FAILURES = 5;
  * Both ways the wait can end with no case: the api reported FAILED, or the
  * generation never came back inside POLL_ATTEMPTS. The player is told the same
  * thing either way - from where they sit the two are one outcome.
+ *
+ * It does not say why, because the api does not know either by the time this is
+ * read: a model that answered nothing usable and a model that refused the call
+ * for the day both land here as FAILED. So it names both ways out rather than
+ * only the retry - the old copy sent a player back to the file picker even when
+ * a second photo could not possibly have worked. "Take another case" is the
+ * button underneath, which goes back to the strips of cases already on file.
  */
-const NO_CASE_MESSAGE = "Not enough evidence to bring a case. Try another photo.";
+const NO_CASE_MESSAGE =
+    "No case could be filed for this photo. Try another photo, or take one of the cases already on file.";
 
 const currentCase = ref<PublicCase | null>(null);
 const error = ref<string | null>(null);

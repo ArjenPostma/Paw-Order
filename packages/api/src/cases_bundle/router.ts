@@ -181,7 +181,10 @@ const perIpDailyLimiter = rateLimit({
  */
 const dogCheckBudget = dailyBudget({
     dailyMax: () => positiveIntEnv("DOG_CHECK_MAX_PER_DAY", 200),
-    message: "The court has closed its doors for today. Try again tomorrow.",
+    // No message of its own: the default already says the one thing that is true
+    // of both daily ceilings - no new case today, the ones on file still open.
+    // Which of the two the caller met is an operator's question, not a player's.
+    //
     // Deliberately NOT refunded: the 400 this guards IS the spend it bounds.
 });
 const globalDailyBudget = dailyBudget({
@@ -622,6 +625,26 @@ casesRouter.get("/public", perIpDocketLimiter, async (_req, res) => {
 });
 
 /**
+ * The ceiling on reading a case, and ONE instance for both read routes on
+ * purpose: an id and a slug fetch the same row and parse the same whole bible,
+ * and the docket hands out ids as freely as a link hands out slugs, so a
+ * per-route cap is a cap a caller sidesteps by alternating between them.
+ *
+ * Sized for the poll loop rather than for a page view: a generating case is
+ * fetched every 2s for up to 3 minutes, so one player already costs ~30 a
+ * minute. 300 leaves room for about ten of those at once behind a single
+ * address, which is what a shared link at a school or an office looks like, and
+ * still bounds what one source can make this process parse.
+ *
+ * It is not a defence against a distributed flood - nothing here is - it bounds
+ * the single-source case.
+ */
+const perIpCaseReadLimiter = rateLimit({
+    windowMs: 60_000,
+    max: () => positiveIntEnv("CASE_READ_MAX_PER_MINUTE", 300),
+});
+
+/**
  * A shared link's slug: "biscuit-a1b2c3". Same job as UUID_PATTERN on the id
  * routes - it keeps a junk path from reaching a query, and it bounds the length
  * of a string an anonymous caller puts in a WHERE clause.
@@ -637,7 +660,7 @@ const MAX_SLUG_LENGTH = 64;
  * cannot reach a private one - which is what makes "only public cases get a
  * link" a property of the data rather than a rule the client is trusted with.
  */
-casesRouter.get("/link/:slug", async (req, res) => {
+casesRouter.get("/link/:slug", perIpCaseReadLimiter, async (req, res) => {
     // Set before the guards so every arm carries it: a case published a moment
     // from now must not be answered "not found" out of a cache, and a malformed
     // slug's 404 is otherwise heuristically cacheable by any shared proxy. The
@@ -724,12 +747,15 @@ function isOperator(req: Request): boolean {
     return a.length === b.length && timingSafeEqual(a, b);
 }
 
-casesRouter.get("/:id", async (req, res) => {
+casesRouter.get("/:id", perIpCaseReadLimiter, async (req, res) => {
     const id = req.params.id;
     // The column is uuid on Postgres and varchar on sqlite: without this check a
     // malformed id is a clean miss in dev and a 22P02 driver error (surfacing as
     // a 500, plus a stack trace per crawler hit) in production.
-    if (!id || !UUID_PATTERN.test(id)) {
+    //
+    // typeof, not a truthiness check, for the reason /turn gives: the limiter
+    // above widens Express's inferred params to string | string[].
+    if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
         res.status(404).json({ error: "Case not found." });
         return;
     }

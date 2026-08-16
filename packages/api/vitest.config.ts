@@ -21,6 +21,9 @@ export default defineConfig({
             GENERATION_MAX_PER_DAY: "1000",
             DOG_CHECK_MAX_PER_DAY: "1000",
             GENERATION_MAX_CONCURRENT: "50",
+            // The suite polls a generating case in a tight loop, many times per
+            // test, all from one address - far past what a player ever reads.
+            CASE_READ_MAX_PER_MINUTE: "100000",
         },
     },
 });

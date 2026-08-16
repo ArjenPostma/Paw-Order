@@ -46,6 +46,30 @@ function freshPhoto(): Buffer {
 const app = createApp();
 
 /**
+ * An app that reads req.ip from X-Forwarded-For, so a test can mint a caller no
+ * other test in this file has spent. Every request through `app` above shares
+ * one socket address, so a ceiling lowered for one test would meet a count the
+ * rest of the suite had already run up. The limiters themselves are module state
+ * shared with `app`, which is fine as long as the address is fresh.
+ *
+ * TRUST_PROXY is read once, when the app is built, so it is set around the
+ * construction rather than for the length of a test.
+ */
+function appTrustingProxy() {
+    const previous = process.env.TRUST_PROXY;
+    process.env.TRUST_PROXY = "true";
+    try {
+        return createApp();
+    } finally {
+        if (previous === undefined) {
+            delete process.env.TRUST_PROXY;
+        } else {
+            process.env.TRUST_PROXY = previous;
+        }
+    }
+}
+
+/**
  * Generation runs in the background, so a freshly created case is PENDING and
  * the client polls. In test the generator returns a fixture with no model call,
  * so this resolves in a handful of ticks.
@@ -880,30 +904,12 @@ describe("generation slot accounting", () => {
  * behind every check that can turn a request away without generating anything,
  * so a request that produced no case never costs the player one.
  *
- * Needs its own app because it needs its own caller. req.ip is the socket
- * address unless TRUST_PROXY is set, so every other test in this file spends the
- * same bucket, and a ceiling lowered here would meet a count they had already
- * run up. With trust proxy on, X-Forwarded-For mints a caller nothing else has
- * spent. The limiters themselves are module state shared with `app`, which is
- * fine as long as the address is fresh.
+ * Needs its own caller, so it runs against appTrustingProxy above.
  *
  * The ceilings are read per request (thunks in router.ts), which is the only
  * reason a value set here is visible to a limiter built at import time.
  */
 describe("generation ceilings are charged last", () => {
-    function appTrustingProxy() {
-        const previous = process.env.TRUST_PROXY;
-        process.env.TRUST_PROXY = "true";
-        try {
-            return createApp();
-        } finally {
-            if (previous === undefined) {
-                delete process.env.TRUST_PROXY;
-            } else {
-                process.env.TRUST_PROXY = previous;
-            }
-        }
-    }
     const proxiedApp = appTrustingProxy();
     // vitest.config.ts pins this at 1000 for the rest of the suite, so it is
     // restored rather than deleted.
@@ -1165,6 +1171,45 @@ describe("shared case links", () => {
         // The id still works: the case is the player's own, and their strip
         // replays it. Only the link is gone.
         expect((await request(app).get(`/api/cases/${id}`)).status).toBe(200);
+    });
+
+    // One budget across both ways of reading a case, not one each. They fetch
+    // the same row and parse the same bible, and the docket hands out ids as
+    // freely as a link hands out slugs - so a ceiling a caller sidesteps by
+    // alternating between the two routes is not a ceiling.
+    it("spends one ceiling across both ways of reading a case", async () => {
+        const id = await readyCase("Biscuit", true);
+        const slug: string = (await request(app).get(`/api/cases/${id}`)).body.slug;
+        // vitest.config.ts pins this far above the suite's own polling, so it is
+        // restored rather than deleted.
+        const pinned = process.env.CASE_READ_MAX_PER_MINUTE;
+        const proxiedApp = appTrustingProxy();
+        const ip = "203.0.113.20";
+
+        process.env.CASE_READ_MAX_PER_MINUTE = "2";
+        try {
+            const byId = await request(proxiedApp)
+                .get(`/api/cases/${id}`)
+                .set("X-Forwarded-For", ip);
+            expect(byId.status).toBe(200);
+
+            const byLink = await request(proxiedApp)
+                .get(`/api/cases/link/${slug}`)
+                .set("X-Forwarded-For", ip);
+            expect(byLink.status).toBe(200);
+
+            // Two reads spent, whichever route spent them.
+            const third = await request(proxiedApp)
+                .get(`/api/cases/${id}`)
+                .set("X-Forwarded-For", ip);
+            expect(third.status).toBe(429);
+        } finally {
+            if (pinned === undefined) {
+                delete process.env.CASE_READ_MAX_PER_MINUTE;
+            } else {
+                process.env.CASE_READ_MAX_PER_MINUTE = pinned;
+            }
+        }
     });
 
     it("404s a slug nobody holds, and one that is not a slug", async () => {

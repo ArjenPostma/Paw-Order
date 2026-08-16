@@ -166,7 +166,11 @@ export interface DailyBudgetOptions {
  */
 export function dailyBudget({
     dailyMax,
-    message = "The daily limit for new cases has been reached.",
+    // Says what the player can do next, not which ceiling they met: from the
+    // envelope, "the model budget is spent" and "the dog check is spent" are one
+    // outcome, and the cases already on file are the way out of both. The upload
+    // screen renders this directly above those strips.
+    message = "The court is closed to new cases today. The cases below are still open.",
     refundOnRejection = false,
 }: DailyBudgetOptions): RequestHandler {
     let daily: Bucket = { count: 0, startedAt: Date.now() };
