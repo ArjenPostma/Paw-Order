@@ -2,12 +2,7 @@ import { createHash } from "node:crypto";
 import { Router } from "express";
 import type { RequestHandler } from "express";
 import multer, { MulterError } from "multer";
-import {
-    RegExpMatcher,
-    englishDataset,
-    englishRecommendedTransformers,
-    skipNonAlphabeticTransformer,
-} from "obscenity";
+import { RegExpMatcher, englishDataset, englishRecommendedTransformers } from "obscenity";
 import { positiveIntEnv } from "@/config/env";
 import {
     GenerationBusyError,
@@ -222,24 +217,29 @@ function sanitiseName(body: unknown): string {
 // the game reads back to them on five screens. Two things it may not be.
 //
 // englishRecommendedTransformers is why the dependency is here rather than a
-// wordlist: it folds leetspeak, spacing and repeated characters back to the
-// dataset's terms, so the obvious evasions of a flat list do not work. It is
-// English only, and it will turn away a dog genuinely called Dick. Both are
-// accepted: a false reject costs one retype on the first screen.
+// wordlist: it folds leetspeak, confusable characters and repeated letters back
+// to the dataset's terms, so the obvious evasions of a flat list do not work.
+// It is English only, and it will turn away a dog genuinely called Dick. Both
+// are accepted: a false reject costs one retype on the first screen.
 const obsceneName = new RegExpMatcher({
     ...englishDataset.build(),
     ...englishRecommendedTransformers,
-    // Not in the recommended set, and needed here: without it "f u c k e r" is
-    // 11 characters of nothing to the matcher. The false positives it usually
-    // brings come from running words together in a sentence, and a name is at
-    // most 32 characters with the whitelist still applied over it - "Shih Tzu",
-    // "Miss Titus" and "Sir Barks A Lot" all pass.
-    blacklistMatcherTransformers: [
-        // Optional on the type, always present on the recommended set.
-        ...(englishRecommendedTransformers.blacklistMatcherTransformers ?? []),
-        skipNonAlphabeticTransformer(),
-    ],
 });
+
+/**
+ * "f u c k e r" is eleven characters of nothing to the matcher, so the spaced
+ * spelling is squashed and checked as well.
+ *
+ * Only runs between SINGLE letters, which is the whole point. obscenity ships
+ * skipNonAlphabeticTransformer for this, and it joins across every space: with
+ * it, "Anna Nussbaum", "Bob Itchy" and "Bo Oberon" are all turned away, because
+ * the whitelist matches the untransformed string and never sees the joined
+ * form. Turning away a real dog is worse than missing an evasion, and the
+ * evasions this does miss ("f1u1c1k") arrive garbled anyway.
+ */
+function squashSpacedLetters(name: string): string {
+    return name.replace(/\b(\w)[\s._-]+(?=\w\b)/g, "$1");
+}
 // Deliberately not a general "word dot word" pattern: that also matches
 // "St.Bernard". A scheme, a www, or a known TLD is what a name being used as an
 // advertisement actually looks like.
@@ -262,7 +262,7 @@ const requireCleanName: RequestHandler = (req, res, next) => {
         res.status(400).json({ error: URL_NAME });
         return;
     }
-    if (obsceneName.hasMatch(name)) {
+    if (obsceneName.hasMatch(name) || obsceneName.hasMatch(squashSpacedLetters(name))) {
         res.status(400).json({ error: OBSCENE_NAME });
         return;
     }
