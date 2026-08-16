@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import { Router } from "express";
 import type { RequestHandler } from "express";
 import multer, { MulterError } from "multer";
+import {
+    RegExpMatcher,
+    englishDataset,
+    englishRecommendedTransformers,
+    skipNonAlphabeticTransformer,
+} from "obscenity";
 import { positiveIntEnv } from "@/config/env";
 import {
     GenerationBusyError,
@@ -33,6 +39,8 @@ const MAX_NAME_LENGTH = 32;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PHOTO_REQUIRED = "A photo (jpeg, png or webp, max 8MB) is required.";
 const NOT_A_DOG = "This court only tries dogs. Try a photo of one.";
+const OBSCENE_NAME = "The court will not read that name aloud. Try the one the dog answers to.";
+const URL_NAME = "That is a web address, not a name.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // C0, DEL and C1, plus the invisible formatting characters. The formatting ones
 // are not control characters and not \s, so without them here a name of 32 zero
@@ -209,6 +217,58 @@ function sanitiseName(body: unknown): string {
     return cut || DEFAULT_DEFENDANT_NAME;
 }
 
+// The player's name for their dog is written through the whole bible - the
+// charge, the timeline, every witness claim - and it is the one string of theirs
+// the game reads back to them on five screens. Two things it may not be.
+//
+// englishRecommendedTransformers is why the dependency is here rather than a
+// wordlist: it folds leetspeak, spacing and repeated characters back to the
+// dataset's terms, so the obvious evasions of a flat list do not work. It is
+// English only, and it will turn away a dog genuinely called Dick. Both are
+// accepted: a false reject costs one retype on the first screen.
+const obsceneName = new RegExpMatcher({
+    ...englishDataset.build(),
+    ...englishRecommendedTransformers,
+    // Not in the recommended set, and needed here: without it "f u c k e r" is
+    // 11 characters of nothing to the matcher. The false positives it usually
+    // brings come from running words together in a sentence, and a name is at
+    // most 32 characters with the whitelist still applied over it - "Shih Tzu",
+    // "Miss Titus" and "Sir Barks A Lot" all pass.
+    blacklistMatcherTransformers: [
+        // Optional on the type, always present on the recommended set.
+        ...(englishRecommendedTransformers.blacklistMatcherTransformers ?? []),
+        skipNonAlphabeticTransformer(),
+    ],
+});
+// Deliberately not a general "word dot word" pattern: that also matches
+// "St.Bernard". A scheme, a www, or a known TLD is what a name being used as an
+// advertisement actually looks like.
+const URL_NAME_PATTERN =
+    /:\/\/|\bwww\.|\.(com|net|org|io|co|dev|app|xyz|me|ru|info|biz|shop|top|link|site|online|store|tv|ai|gg|nl|uk|de)\b/i;
+
+/**
+ * Turns away a name the court cannot say out loud, and one that is really a
+ * link. Sanitised first, so the check reads the same string the generator will:
+ * a name spelled with control characters between its letters must not slip past
+ * a check that ran before they were stripped.
+ *
+ * Mounted ahead of the dog check and every ceiling, because rejecting it costs
+ * nothing - and ahead of reuseExistingCase, so a name banned today cannot be
+ * replayed through a case generated for it yesterday.
+ */
+const requireCleanName: RequestHandler = (req, res, next) => {
+    const name = sanitiseName(req.body);
+    if (URL_NAME_PATTERN.test(name)) {
+        res.status(400).json({ error: URL_NAME });
+        return;
+    }
+    if (obsceneName.hasMatch(name)) {
+        res.status(400).json({ error: OBSCENE_NAME });
+        return;
+    }
+    next();
+};
+
 /** Split out so the daily budget can be charged after it, never before. */
 const requirePhoto: RequestHandler = (req, res, next) => {
     if (!req.file) {
@@ -334,6 +394,7 @@ casesRouter.post(
     perIpUploadLimiter,
     uploadPhoto,
     requirePhoto,
+    requireCleanName,
     reuseExistingCase,
     rejectWhenBusy,
     dogCheckBudget,
